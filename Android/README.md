@@ -1,6 +1,6 @@
-# Android 原生电视桌面
+# ABU Launcher (阿布桌面)
 
-Kotlin + Jetpack Compose 独立 Android 工程，不依赖 Flutter。最低 Android 9（API 28）。
+Kotlin + Jetpack Compose 独立 Android TV 原生工程，不依赖 Flutter。最低 Android 9（API 28）。
 
 ## 当前范围
 

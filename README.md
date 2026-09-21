@@ -1,4 +1,4 @@
-# NativeTvDesktop (Android 原生电视桌面)
+# ABU Launcher (阿布桌面)
 
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.4.10-purple.svg)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-1.10.4-green.svg)](https://developer.android.com/jetpack/compose)
@@ -6,9 +6,9 @@
 [![TargetSdk](https://img.shields.io/badge/targetSdk-Android%2015%20(API%2035)-orange.svg)](https://developer.android.com/about/versions/15)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**NativeTvDesktop** 是一个专为 Android 智能电视及机顶盒大屏设备打造的高性能、现代化**原生电视桌面（Android TV Launcher）**。
+**ABU Launcher（阿布桌面）** 是一款专为 Android 智能电视及机顶盒大屏设备打造的高性能、现代化**原生电视桌面（Android TV Launcher）**。
 
-基于 **100% Kotlin + Jetpack Compose** 开发，彻底摆脱传统 Android TV 对旧版 Leanback 架构或跨平台方案（如 Flutter）的依赖，深度复刻类似 Apple TV / tvOS 的极致流体拟态视觉与焦点动效交互。
+基于 **100% Kotlin + Jetpack Compose** 纯原生开发，彻底摆脱传统 Android TV 对旧版 Leanback 架构或跨平台方案（如 Flutter）的依赖，深度复刻类似 Apple TV / tvOS 的极致流体拟态视觉与焦点动效交互。
 
 ---
 
@@ -31,6 +31,8 @@
 
 ## 🛠️ 技术栈与架构
 
+- **应用名称**：ABU Launcher（阿布桌面）
+- **包名 (Namespace)**：`com.limi.tvdesktop`
 - **编程语言**：Kotlin 2.4.10
 - **构建系统**：Gradle 9.5.0 / Android Gradle Plugin 9.3.2
 - **Java 版本**：Java 17 (JavaVersion.VERSION_17)
@@ -54,7 +56,6 @@
 │   ├── qa/                     # 验证文档与测试用例
 │   ├── build.gradle.kts        # 工程级构建脚本
 │   └── settings.gradle.kts     # 模块设置
-├── Gemini-3.8-Flash.md         # 架构设计与源码深度剖析报告
 ├── LICENSE                     # MIT 开源许可证
 └── README.md                   # 项目说明文档
 ```
@@ -73,17 +74,17 @@
 在 `Android` 目录下执行：
 
 ```powershell
-# Windows
+# Windows 编译 Debug 版本
 cd Android
 ./gradlew.bat assembleDebug
 
-# macOS / Linux
-cd Android
-./gradlew assembleDebug
+# Windows 编译 Release 版本
+./gradlew.bat assembleRelease
 ```
 
 编译成功后，APK 产物位于：
-`Android/app/build/outputs/apk/debug/app-debug.apk`
+- **Debug 版**：`Android/app/build/outputs/apk/debug/app-debug.apk`
+- **Release 版**：`Android/app/build/outputs/apk/release/app-release-unsigned.apk`
 
 ### 安装到电视或模拟器
 
