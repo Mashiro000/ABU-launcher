@@ -11,6 +11,10 @@ Android/**/*.iml
 .gradle/
 build/
 
+# Local APK exports
+release_apk/
+*.apk
+
 # Android logs and test artifacts
 Android/*.txt
 Android/*.log
