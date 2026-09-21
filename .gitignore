@@ -1,0 +1,30 @@
+# Android build and cache
+Android/.gradle/
+Android/.kotlin/
+Android/**/build/
+Android/local.properties
+Android/.idea/
+Android/*.iml
+Android/**/*.iml
+
+# Gradle files in root if any
+.gradle/
+build/
+
+# Android logs and test artifacts
+Android/*.txt
+Android/*.log
+Android/emulator-*.log
+Android/.artifacts/
+
+# QA test screenshots (heavy files ~370MB)
+Android/qa/*.png
+
+# Local AI / temporary editor files
+.reasonix/
+.tmp-shot/
+.workbuddy/
+home-seconds.png
+*.hprof
+.DS_Store
+Thumbs.db

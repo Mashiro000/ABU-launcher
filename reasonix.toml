@@ -1,0 +1,2 @@
+[permissions]
+allow = ["Bash=cd \"E:\\limi\\launcher 3\"; Get-ChildItem -Force | Select-Object Mode,Name", "Bash=cd \"E:\\limi\\launcher 3\"; Get-ChildItem -Recurse -File -Include *.tsx,*.ts,*.jsx,*.js,*.vue,*.css,*.scss -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch 'node_modules|\\.git|dist|build' } | Select-Object -ExpandProperty FullName | Select-Object -First 200"]
