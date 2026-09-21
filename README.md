@@ -11,6 +11,14 @@
 基于 **100% Kotlin + Jetpack Compose** 纯原生开发，彻底摆脱传统 Android TV 对旧版 Leanback 架构或跨平台方案（如 Flutter）的依赖，深度复刻类似 Apple TV / tvOS 的极致流体拟态视觉与焦点动效交互。
 
 ---
+<img width="1280" height="696" alt="image" src="https://github.com/user-attachments/assets/30a557a0-7090-4b4c-9971-c299461aac7c" />
+<img width="1280" height="696" alt="image" src="https://github.com/user-attachments/assets/ed5a1b34-da17-4678-ae06-bc37250366bd" />
+<img width="1280" height="696" alt="image" src="https://github.com/user-attachments/assets/a4d841a7-193f-4730-9308-550560fd899c" />
+<img width="1164" height="655" alt="image" src="https://github.com/user-attachments/assets/3e697f4c-92e0-4f73-b962-a8996a5eefb1" />
+
+
+
+
 
 ## ✨ 核心特性
 
