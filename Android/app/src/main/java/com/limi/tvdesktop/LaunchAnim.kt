@@ -40,7 +40,7 @@ internal fun launchAppWithClipReveal(context: Context, view: View, bounds: Rect?
     val centerY = bounds?.center?.y?.toInt() ?: (screenH / 2)
 
     val bundle = runCatching {
-        when (LaunchAnim.current(context)) {
+        when (if (RenderPerformance.reducedEffects) LaunchAnim.SYSTEM else LaunchAnim.current(context)) {
             LaunchAnim.SYSTEM -> null
             LaunchAnim.CIRCLE -> {
                 // Launcher3-style: reveal from the icon centre with a tight square.

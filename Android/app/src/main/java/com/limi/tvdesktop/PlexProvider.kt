@@ -87,6 +87,12 @@ class PlexProvider(override val account: MediaAccount) : MediaSourceProvider {
         }.getOrDefault(emptyList())
     }
 
+    override suspend fun getFavorites(): List<MediaItemInfo> = withContext(Dispatchers.IO) {
+        // Plex doesn't have a single unified favorites endpoint across all libraries without section IDs,
+        // return empty list as safe default
+        emptyList()
+    }
+
     override suspend fun getCategories(): List<MediaCategoryInfo> = withContext(Dispatchers.IO) {
         runCatching {
             val req = request("/library/sections")
@@ -197,6 +203,7 @@ class PlexProvider(override val account: MediaAccount) : MediaSourceProvider {
             val durMs = obj.optLong("duration", 0L)
             val viewOffset = obj.optLong("viewOffset", 0L)
             val progress = if (durMs > 0) (viewOffset.toFloat() / durMs.toFloat()).coerceIn(0f, 1f) else 0f
+            val lastPlayedAtMs = obj.optLong("lastViewedAt", obj.optLong("viewedAt", 0L)) * 1000L
 
             val detail = when (type) {
                 "episode" -> {
@@ -227,6 +234,7 @@ class PlexProvider(override val account: MediaAccount) : MediaSourceProvider {
                     progress = progress,
                     playbackPositionMs = viewOffset,
                     totalDurationMs = durMs,
+                    lastPlayedAtMs = lastPlayedAtMs,
                     mediaType = type,
                     year = year,
                     rating = obj.optString("rating", ""),

@@ -169,6 +169,7 @@ object VideoWallpaperPrefs {
 
 /** Full-screen looping, muted video surface used as the launcher background. */
 @Composable
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 internal fun VideoWallpaperSurface(uri: Uri, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val player = remember(uri) {

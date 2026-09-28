@@ -11,6 +11,61 @@ object DesktopPreferences {
     var version by mutableIntStateOf(0)
         private set
 
+    object GlassTuning {
+        const val NAV_BLUR_DEFAULT = 24f
+        const val NAV_OPACITY_DEFAULT = .20f
+        const val DOCK_BLUR_DEFAULT = 28f
+        const val DOCK_OPACITY_DEFAULT = .20f
+        const val APP_LIST_BLUR_DEFAULT = 50f
+        const val APP_LIST_OPACITY_DEFAULT = .30f
+
+        private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        fun navBlur(context: Context) = prefs(context).getFloat("glassNavBlur", NAV_BLUR_DEFAULT)
+        fun navOpacity(context: Context) = prefs(context).getFloat("glassNavOpacity", NAV_OPACITY_DEFAULT)
+        fun dockBlur(context: Context) = prefs(context).getFloat("glassDockBlur", DOCK_BLUR_DEFAULT)
+        fun dockOpacity(context: Context) = prefs(context).getFloat("glassDockOpacity", DOCK_OPACITY_DEFAULT)
+        fun appListBlur(context: Context) = prefs(context).getFloat("glassAppListBlur", APP_LIST_BLUR_DEFAULT)
+        fun appListOpacity(context: Context) = prefs(context).getFloat("glassAppListOpacity", APP_LIST_OPACITY_DEFAULT)
+
+        fun save(context: Context, key: String, value: Float) {
+            prefs(context).edit().putFloat(key, value).apply()
+            version++
+        }
+        fun reset(context: Context, key: String) {
+            prefs(context).edit().remove(key).apply()
+            version++
+        }
+        fun resetNav(context: Context) {
+            prefs(context).edit().remove("glassNavBlur").remove("glassNavOpacity").apply(); version++
+        }
+        fun resetDock(context: Context) {
+            prefs(context).edit().remove("glassDockBlur").remove("glassDockOpacity").apply(); version++
+        }
+        fun resetAppList(context: Context) {
+            prefs(context).edit().remove("glassAppListBlur").remove("glassAppListOpacity").apply(); version++
+        }
+    }
+
+    enum class PlaybackEngine(val label: String, val desc: String) {
+        AUTO("自动选择（推荐）", "优先内置播放器，解码失败时切换 mpv"),
+        INTERNAL("内置播放器", "统一界面与最低操作延迟"),
+        MPV("mpv", "直接使用 mpv，适合 HEVC 与 ASS 特效字幕");
+
+        companion object {
+            fun current(context: Context): PlaybackEngine {
+                val name = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .getString("playbackEngine", AUTO.name) ?: AUTO.name
+                return runCatching { valueOf(name) }.getOrDefault(AUTO)
+            }
+
+            fun save(context: Context, engine: PlaybackEngine) {
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .edit().putString("playbackEngine", engine.name).apply()
+                version++
+            }
+        }
+    }
+
     // 1. 时钟样式
     enum class ClockStyle(val label: String, val desc: String) {
         STANDARD("标准数字时钟", "显示时分秒与完整农历公历"),
@@ -128,6 +183,17 @@ object DesktopPreferences {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit().putBoolean("autoStartOnBoot", enabled).apply()
             version++
+        }
+    }
+
+    // 7. 记住上次停留页面
+    object LastTab {
+        fun get(context: Context): String =
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("lastTab", "媒体库") ?: "媒体库"
+
+        fun set(context: Context, tab: String) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putString("lastTab", tab).apply()
         }
     }
 }

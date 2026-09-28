@@ -105,7 +105,7 @@ private class RowFocusNavigator(val scope: CoroutineScope) {
                         // settles (mirrors the horizontal shelf).
                         launch { reveal(spec) }
                         var attempts = 0
-                        while (nodes.none { it.row == spec.id && it.centerX() != null } && attempts < 300) {
+                        while (nodes.none { it.row == spec.id && it.centerX() != null } && attempts < 25) {
                             withFrameNanos { }
                             attempts++
                         }

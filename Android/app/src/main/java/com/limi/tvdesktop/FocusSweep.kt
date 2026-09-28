@@ -15,6 +15,7 @@ import kotlin.math.hypot
 
 /** A complete top-left to bottom-right overlay sweep, once per selection. */
 internal fun Modifier.focusSweep(selected: Boolean, shape: Shape = Glass): Modifier = composed {
+    if (RenderPerformance.reducedEffects) return@composed this
     val progress = remember { Animatable(0f) }
     LaunchedEffect(selected) {
         progress.snapTo(0f)

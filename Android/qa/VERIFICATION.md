@@ -91,3 +91,67 @@ MuMu 鏂瑰悜閿祴璇曟埅鍥撅細detail-back-focus.png銆乨etail-final-bottom.png锛堝
 - 修改：MainActivity.kt FocusCard onClick targetScale else 分支 1.1f -> 1f（zoomOnFocus=false 时 bounds 已是焦点态最终视觉尺寸）。
 - 验证：assembleDebug 构建成功；设备未在线（MuMu 未启动、SM-F936N 无线掉线），待装机目测。
   2026-09-20 02:00 已装到 SM-F936N（无线 adb，lastUpdateTime 02:00:47）并启动，动画待目测。
+
+## 2026-09-23 媒体库：我的媒体焦点行错位 + 「我的收藏」缺失修复
+- 问题 1/2：真实 Emby 分类图是 16:9（Views 返回 PrimaryImageAspectRatio=1.777，每行 4 张共 3 行）；但焦点行按 collectionType 猜成 224dp 竖版（每行 6 张、只算 2 行），中间一行（华语剧集/华语电影/纪录纪实/其他动漫）几乎不可达——按 ↓ 从第一行直接跳到最下面的「国产动漫」，所以要按好几下。
+- 修复：EmbyProvider 解析 Views 的 PrimaryImageAspectRatio，经 MediaCategoryInfo / MediaItemInfo / 本地缓存透传；CategoryCard 尺寸改为确定性函数 categoryCardSize(categoryCardRatio(...))（服务器比例 > 本地示例图 > collectionType 兜底），不再依赖异步加载的 bitmap；新增 buildCategoryGridLayout() 用同一套尺寸精确复刻 FlowRow 换行，并逐行给出 FocusRowSpec.centerOffsetDp。
+- 问题 3：服务器收藏为空（Filters=IsFavorite 返回 TotalRecordCount: 0）时 if (favoriteList.isNotEmpty()) 把整个「我的收藏」模块隐藏。改为始终渲染：有收藏显示筛选栏+卡片，无收藏显示紧凑的「暂无收藏」，且不登记没有可聚焦节点的焦点行。
+- 验证：assembleDebug 成功并安装 emulator-5554（MuMu；应用在 SurfaceFlinger 任务显示屛，screencap -a 取 _1/_2）。按键日志：watching -> categories_row_0 -> categories_row_1 -> categories_row_2 -> 最近添加:actions -> 最近添加:cards，逐行居中 y=799.5px（target 799.62）。截图 hp1_1（日漫番剧）、hp2_1（华语剧集，原不可达的中间行）、hp3_1（国产动漫）；「我的收藏 / 暂无收藏」正常显示在国产动漫下方。lintDebug 仅剩改动前既有的 6 个错误（MainActivity dispatchKeyEvent 的 RestrictedApi、Wallpaper media3 opt-in），与本次改动无关。
+
+## 2026-09-23 媒体库详情页：真实数据 + 标题改用影片 logo
+- 问题：详情页除标题/海报/简介/进度外几乎全是写死演示数据（"原创剧集 ORIGINAL SERIES"/"精选电影 FEATURE FILM"、4K/HDR 徽章、"2024 | 共 12 集 | 剧情·家庭"、剧集名"潮声之初"、演员"林夏/陈牧驰"、类似作品 demo 列表、"更多信息"全是"演示资料"、"媒体信息"写死 4K HEVC/Dolby/1.2GB）；标题用文字而非影片 logo。
+- 数据层：MediaModels 新增 PersonInfo / MediaStreamInfo / MediaSourceInfo / MediaDetailInfo；MediaSourceProvider 增加 getItemDetail/getSimilar（默认返回 null/empty，Plex/WebDAV 不受影响）；EmbyProvider 实现 /Users/{uid}/Items/{id}?Fields=People,Studios,MediaSources,... 与 /Items/{id}/Similar，解析演职人员（头像 /Items/{personId}/Images/Primary）、制片公司、国家、分级、评分、首播、状态与媒体流。
+- UI：MediaDetailPage 异步拉取 itemDetail/similar；标题改为 realItem.logoUrl 的 logo 图片（加载失败才回退文字），副标题用 OriginalTitle，eyebrow 用真实 mediaType，meta 用真实年份/集数/类型，徽章用真实分级与评分；演职人员、类似作品、更多信息、媒体信息全部改用真实数据；没有数据的模块整块隐藏（用户选择"没有数据就整块隐藏"），同时不登记对应焦点行，避免空行等待；单季剧集不再显示假的"第 1 季"按钮。
+- 验证：assembleDebug 成功并装 emulator-5554。真实 Emby 条目（剧集 2740 / 电影 逃出绝命街）：标题显示影片 logo，原始标题=透明な夜に駆ける君と、目に見えない恋をした。，首播 2026-07-06，集数 3 集，制作公司 AT-X，分级 BR-16，评分 7.9，状态 连载中；演职人员=入野自由/早见沙织（真实头像）；类似作品=与你相恋到生命尽头/来自深渊/【我推的孩子】等（Emby Similar）；电影媒体信息=视频 4K HEVC 3840×2160、音频 English EAC3 5.1、字幕 chi/eng、文件大小 17.7 GB MKV（全部来自 MediaSources）。截图 .tmp-shot/d_2.png、e2_2/e3_2/e4_2/e5_2.png、m_2.png、mh_2.png。
+
+
+## 2026-09-23 分类海报墙：只显示剧集/电影（不再混入单集）
+- 问题：从「我的媒体」点进分类海报墙，出现大量"某一集"（如 花开锦绣 S1E26、深渊无间 S1E6），卡片是 2:3 竖屏、里面却是 16:9 分集剧照被裁切，看着像没有标题文字的杂图。
+- 根因：EmbyProvider.getCategoryItems 用 ParentId + Recursive=true 但不带 IncludeItemTypes，Emby 会把所有子孙分集（Episode）一并返回。实测日漫番剧库前 30 条里 26 条是 Episode。
+- 修复：请求加 IncludeItemTypes=Movie,Series,Video,BoxSet,MusicAlbum,Audio,Photo，Limit 30 -> 60。tvshows 库只返回 Series（竖版海报），movies 库只返回 Movie。
+- 验证：华语剧集分类从"30 部作品（含 26 条单集）"变为"14 部作品"，全部是剧集竖版海报（边水往事/蝉/地下交通站/冬城猎凶/反人类暴行/花开锦绣/金色/深渊无间…），每张海报自带标题，卡片下方也有标题+「电视剧」。截图 .tmp-shot/pw5_2.png，无障碍树文本核对 .tmp-shot/pw5.xml。
+
+
+## 2026-09-23 我的媒体改横向单行 + 海报墙分页加载
+- 「我的媒体」：从 FlowRow 多行改为单行横向 LazyRow（ShelfScrollController + 左右键选择 + 滚轮横滚），焦点行从 categories_row_0..N 收敛为单个 "categories"，并删除不再使用的 buildCategoryGridLayout/CategoryGridLayout。分类卡尺寸仍走 categoryCardRatio/categoryCardSize（确定性尺寸）。
+- 海报墙分页：每页 5 行（设计宽 7 列 → pageSize=35），滑到已加载内容倒数第 3 行时自动拉下一页；顶部计数改用服务器 TotalRecordCount；加载中在网格末尾显示小转圈。数据层新增 MediaSourceProvider.getCategoryItemsPage(categoryId,startIndex,limit)（默认单页实现，Plex/WebDAV 不受影响）与 EmbyProvider 的 StartIndex 实现。
+- 顺带修了一个真实 bug：自动加载原本判断 firstVisibleItemIndex>0，但滚动一行时首行仍部分可见（first 还是 0），条件永远不成立；改为 firstVisibleItemIndex>0 || firstVisibleItemScrollOffset>0，并排除"下"键进入网格：返回键和排序胶囊加 focusProperties{down=gridFocus}，第一个海报持有 gridFocus。
+- 已知限制：排序（最新/评分/标题）目前只对已加载的条目做客户端排序，大库下未加载部分不参与。
+- 验证：IncludeItemTypes 过滤后 9 个分类全部只返回 Series/Movie（API 实测：日漫番剧 25/动漫电影 7/外语剧集 10/外语电影 10/华语剧集 14/华语电影 8/纪录纪实 1/其他动漫 1/国产动漫 1，海报比例均 0.67~0.75 竖版）。分页：临时把每页改成 3 行（21 条）打开日漫番剧，顶部显示 21/25，证明首页按页大小加载且 TotalCount 正确；Emby StartIndex=21 实测返回 4 条。横向货架截图 hz1_1.png（5 张卡、第 5 张在右缘被裁，可继续右滚）。自动加载的画面级验证因为 MuMu 多显示屛 input 路由不稳定（screencap -a 的屛序号在 0/1/2 间跳、uiautomator 频繁 SIGSEGV）未能稳定截到，逻辑已按上述条件修正。
+
+
+## 2026-09-23 详情页媒体信息补回（剧集取首集）+ 首页切媒体库闪图修复
+- 媒体信息模块：之前 showMediaInfo = itemDetail.mediaSource != null，但 Emby 的 Series 级别没有 MediaSources（它挂在每集上），所以剧集详情看不到该模块（电影正常）。修复：EpisodeInfo 增加 mediaSource 字段，getEpisodes 请求 Fields 加 MediaSources 并解析；详情页改用 itemDetail.mediaSource ?: 首个可用集的 mediaSource，标题显示「媒体信息 · 第 N 集」；电影仍用影片自身的 MediaSources；两处都没有才隐藏。
+- 首页切媒体库闪图：壁纸模式 BING 时首页是 Bing 图，切到媒体库走 FollowContentWallpaper；服务器 backdrop 解码前会回退 artwork.image(realMedia)，而真实条目的标题不在内置素材表里，于是回退成内置 demo 电影胶片图，看起来就是"闪过一张其他图片"。修复三处：① PosterCacheManager 新增 peek() 同步读内存缓存，rememberPosterImage 用它做初始值，缓存命中时首帧就是正确图；② 应用启动时按 banner 预取 backdrop（LaunchedEffect + loadPoster）；③ 真实条目在 backdrop 未就绪时不再回退 demo 图，改为中性深色底（详情页 backdrop 同样处理）。
+- 验证：剧集 2740 详情底部显示「媒体信息 · 第 10 集」：视频 1080p HEVC 1920×1080、音频 Japanese AAC stereo (默认) 立体声、字幕 chi、文件大小 157 MB MKV（全部来自该集 MediaSources）。从首页按返回切到媒体库后约 1.2s 截图，壁纸已是正确的内容背景（与奔跑在透明之夜的你…），不再是 demo 图。截图 .tmp-shot/di_2.png、sw_2.png。
+
+
+## 2026-09-23 播放器核查：真实存在，修了「看起来没有播放器」的两个原因
+- 播放器本身：VideoPlayerView.kt 使用 AndroidX Media3 ExoPlayer 1.4.1 + PlayerView（build.gradle 依赖 media3-exoplayer/media3-ui），支持 播放/暂停、±10s、倍速、进度条、调用外部播放器。logcat 实测按下播放后出现 `ExoPlayerImpl: Init ... [AndroidXMedia3/1.4.1]`。
+- 原因 1（已修）：剧集 Series 没有可直接播放的流。实测 Emby：电影 4504 `/Videos/4504/stream.mp4?static=true` = 206 OK；分集 1568 = 206 OK；**剧集 1562 = 500**。而 banner 和详情页的「继续播放」之前直接把 MediaItemInfo.streamUrl 交给播放器，剧集那条就是坏 URL → 黑屏。修复：MediaLibraryManager.playableItem() 把 Series 解析成第一集；详情页优先用已加载的 realEpisodes 第一集（未加载完则异步解析）；banner 播放前异步解析。
+- 原因 2（已加提示 + 兜底）：这台模拟器缺可用的 HEVC 解码器，logcat：`MediaCodecVideoDecoderException: Decoder failed: OMX.google.hevc.decoder`；同时该 Emby 账号没有转码权限（`/Videos/{id}/stream?static=false` 返回 400 "User does not have video remuxing permission"），所以没有服务端兜底，表现为黑屏。修复：VideoPlayerView 增加 onPlayerError 处理，屏幕中央显示「播放失败 + 具体原因 + 调用外部播放器 + 按返回键退出」；并给 ExoPlayer 开启 DefaultRenderersFactory.setEnableDecoderFallback(true)。
+- 结论：有播放器；模拟器播 HEVC 会失败（无硬解 + 无转码权限），真机/电视通常有硬件 HEVC 解码可正常播放，也可用「调用外部播放器」或在 Emby 给该用户开启转码权限。
+- 验证：logcat 证据见上；设备端截图受 MuMu 多显示屛 input 路由影响（按键/截图经常落到别的屛），没能稳定截到播放画面。
+
+
+## 2026-09-23 播放器续做：打通真实播放 + 尺寸/焦点微调
+- 盘点：上一轮（另一个模型，12:21~12:37 写盘）已把播放器 UI 壳子做完：视频层（XML PlayerView + texture_view）+ DanmakuOverlay + 顶部媒体信息 + TvGlassCard 玻璃 + 左播放列表 EpisodePlaylistDrawer + 右弹幕设置 DanmakuSettingsDrawer + 底部 84%x18% 控制条。容器比例、玻璃参数基本符合参考图。
+- 真因（视频播不出来）：MainActivity 用 TvPlaybackInfo.createDemo().copy(...) 构造播放信息，copy 没有覆盖 playlist/danmakus/qualityTag，而 demo playlist 每一集的 streamUrl 都是 https://vjs.zencdn.net/v/oceans.mp4；VideoPlayerView 的 activePlayUrl 又优先取 playlist 里的 URL，所以永远在播测试片，用户的真实媒体从未被使用。
+- 修复：新增 MediaLibraryManager.buildPlaybackInfo()（getItemDetail + getEpisodes → 真实 streamUrl / 真实分集 playlist（真实缩略图、集名、时长）/ 真实编码 qualityTag / 真实年份类型集数；danmakus 置空不造假）；MainActivity 先异步构建 playingInfo 再挂 VideoPlayerScreen（构建期间显示转圈）；VideoPlayerView 去掉 coast_background 假背景改真实 backdrop、失败时不再切 demo 视频、没有播放地址时如实报错。
+- 验证（真实播放）：用工程自带的 intent 钩子喂真实 Emby 分集 URL（Videos/1568，h264）→ 日志 ExoPlayerImpl Init、onTracksChanged groups=18、onPlaybackStateChanged STATE_READY duration=1420053、onIsPlayingChanged true currentPos=6212（持续增长），实机截图为真实动画画面。HEVC 源在这台模拟器上仍 ERROR_CODE_DECODING_FAILED（format_supported=NO_EXCEEDS_CAPABILITIES；模拟器无能用的 HEVC 解码器，且该 Emby 用户没有转码权限），真机/电视通常有硬解可播。
+- UI 调整：底部圆形按钮 54→62、56→64、主播放键 80→88，图标 26→30 / 28→32 / 38→42；顶栏标题 34→38sp、副信息 18→20sp；给播放器根 Box 加 rootFocusRequester，控制器收起时保持根焦点，遥控器任意键可唤回控制器。左面板 19.5%x61%（左 3.8%、上 13%）、右面板 22.5%x54%（右 3.8%、上 14%）已符合参考区间；TvGlassCard 使用真实 hazeEffect（blurRadius 36dp、HazeTint 0x66131622≈40%、1dp 竖向渐变描边、ContinuousCornerShape）。
+- 待办/说明：左右面板默认不展开（按需切换，参考图展示的是展开态）；弹幕没有真实数据源，真实媒体下为空，面板功能保留；排序/弹幕发送目前仍是占位交互。
+
+
+## 2026-09-23 播放器交互修复：控件唤不回 + 无法返回
+- 现象：进播放器后控件自动隐藏，之后按确认/方向键、点击屏幕都唤不出控件；返回键行为也不对。
+- 原因 1（控件唤不回）：控件由 Compose 焦点驱动——控制器收起后原本聚焦的按钮从组合中移除，而视频层是无处不在的 AndroidView（PlayerView），Compose 根节点拿不到焦点，根 Box 的 onPreviewKeyEvent 根本不会触发；另外根节点没有任何点击处理，所以点击也不会显控件。
+- 原因 2（无法返回）：TvDesktop 最外层 Box 的 onPreviewKeyEvent 会抢先消费 Escape/Back 并调用 launch 的 closeOrReturn()，播放器自己的 BackHandler 永远收不到。
+- 修复：① 视频之上、所有面板之下加一层全屏输入层（fillMaxSize + focusRequester + focusable + clickable + onPreviewKeyEvent），控制器收起时请求根焦点、点击/按键都能唤出控件；② 新增 Activity 级 PlayerKeyBridge：MainActivity.dispatchKeyEvent 先问播放器，控件隐藏时任意方向键/OK/Menu 直接 showControls（完全不依赖 Compose 焦点）；③ 最外层 Box 的 Back 拦截在 playingMedia != null 时放行；④ 播放器 BackHandler 改为「有抽屉先关抽屉，否则直接退出」，不再要求先收控件。
+- 验证：logcat TvPlayer —— 控件隐藏 13s 后按 OK 打印「按键唤出控件: keyCode=23」；单次按返回键打印「释放 ExoPlayer: pos=0」即退出。
+
+
+## 2026-09-23 播放器：加载态 + 超时看门狗 + 可读的错误提示
+- 问题：打开视频后黑屏，用户分不清"正在加载"还是"已经失败"，既没有加载进度也没有错误文案。根因：播放器只有 onPlayerError 才显示错误，若一直停在 STATE_BUFFERING（服务器慢/地址失效/解码器卡住）就永远没有反馈；原来的错误浮层字号也偏小（26sp/16sp）。
+- 新增：① isBuffering 状态（onPlaybackStateChanged 驱动：BUFFERING→true，READY/ENDED→false）；② 居中加载浮层：转圈 + 「正在加载…」+ 缓冲进度（已缓冲 X / Y 秒（Z%）），无时长时显示「正在连接媒体服务器…」+ 数据源主机名 + 「超过 20 秒无数据会自动提示错误」；③ 看门狗：持续缓冲且 20 秒无数据 → 直接置错误并写明可能原因与地址；④ onPlayerError 把 ExoPlayer errorCode 映射成中文（网络连接失败 / HTTP 错误 / 无法解码该编码（HEVC）/ 地址不存在），并放大错误浮层（标题 32sp、正文 20sp），新增「重试」按钮（重新 setMediaItem+prepare+play）。
+- 验证（MuMu emulator-5554）：坏地址 https://127.0.0.1:9/none.mp4 → 日志 onPlayerError → STATE_IDLE，截图 er_1.png 显示「播放遇到问题 / 网络连接失败：无法连接到媒体服务器〔ERROR_CODE_IO_NETWORK_CONNECTION_FAILED〕/ [重试] [调用外部播放器] / 按返回键退出播放器」；真实地址 Videos/1568 起播前截图 ld_2.png 显示转圈 +「正在加载… / 正在连接媒体服务器… / osupk.mikari.org / 超过 20 秒无数据会自动提示错误」。

@@ -6,9 +6,12 @@ Android/local.properties
 Android/.idea/
 Android/*.iml
 Android/**/*.iml
+Android/app/release/
 
 # Gradle files in root if any
 .gradle/
+.gradle-home/
+.tmp-gradle/
 build/
 
 # Local APK exports
@@ -21,14 +24,15 @@ Android/*.log
 Android/emulator-*.log
 Android/.artifacts/
 
-# QA test screenshots (heavy files ~370MB)
+# QA test screenshots and temporary captures
 Android/qa/*.png
+Android/*.png
+/*.png
 
 # Local AI / temporary editor files
 .reasonix/
 .tmp-shot/
 .workbuddy/
-home-seconds.png
 *.hprof
 .DS_Store
 Thumbs.db

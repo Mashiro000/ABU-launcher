@@ -47,6 +47,7 @@ fun MediaLibrarySettings(
     val scope = rememberCoroutineScope()
     var showAddDialog by remember { mutableStateOf(false) }
     var selectedAccountForManage by remember { mutableStateOf<MediaAccount?>(null) }
+    var editingAccount by remember { mutableStateOf<MediaAccount?>(null) }
     val firstFocus = remember { FocusRequester() }
 
     BackHandler {
@@ -84,12 +85,18 @@ fun MediaLibrarySettings(
                 )
             }
 
-            TvButton(
-                text = "+ 添加媒体服务器",
-                isPrimary = true,
-                focusRequester = firstFocus,
-                onClick = { showAddDialog = true }
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                TvButton(text = "立即同步全部", onClick = {
+                    MediaLibraryManager.refresh()
+                    Toast.makeText(context, "正在同步所有已启用服务器", Toast.LENGTH_SHORT).show()
+                })
+                TvButton(
+                    text = "+ 添加媒体服务器",
+                    isPrimary = true,
+                    focusRequester = firstFocus,
+                    onClick = { showAddDialog = true }
+                )
+            }
         }
 
         Spacer(Modifier.height(28.dp))
@@ -121,6 +128,30 @@ fun MediaLibrarySettings(
                 Spacer(Modifier.height(10.dp))
             }
         }
+
+        Spacer(Modifier.height(32.dp))
+
+        SettingsSectionTitle("同步与首页")
+        LibraryPreferenceRow("启动时同步服务器", "进入桌面后自动刷新所有启用的媒体源", AccountManager.syncOnLaunch.value, AccountManager::setSyncOnLaunch)
+        Spacer(Modifier.height(10.dp))
+        LibraryPreferenceRow("显示继续观看", "关闭后隐藏首页的继续观看与剧集续播内容", AccountManager.showNextUp.value) {
+            AccountManager.setShowNextUp(it)
+            MediaLibraryManager.refresh()
+        }
+        Spacer(Modifier.height(10.dp))
+        LibraryPreferenceRow(
+            "隐藏已看完内容", "从最新内容中隐藏播放进度达到 90% 的项目", AccountManager.hideWatched.value
+        ) {
+            AccountManager.setHideWatched(it)
+            MediaLibraryManager.refresh()
+        }
+
+        Spacer(Modifier.height(32.dp))
+
+        SettingsSectionTitle("播放与服务器兼容")
+        LibraryPreferenceRow("Emby / Jellyfin 优先直接播放", "关闭后允许服务器生成兼容码流；开启可减少服务器转码", AccountManager.preferDirectPlay.value, AccountManager::setPreferDirectPlay)
+        Spacer(Modifier.height(10.dp))
+        LibraryPreferenceRow("允许局域网 HTTP 服务器", "关闭后新增服务器必须使用 HTTPS 地址", AccountManager.allowInsecureConnections.value, AccountManager::setAllowInsecureConnections)
 
         Spacer(Modifier.height(32.dp))
 
@@ -219,12 +250,26 @@ fun MediaLibrarySettings(
     // Add Account Dialog
     if (showAddDialog) {
         AddServerDialog(
+            initialAccount = null,
             onDismiss = { showAddDialog = false },
             onSaved = { newAcc ->
                 AccountManager.addAccount(newAcc)
                 MediaLibraryManager.refresh()
                 showAddDialog = false
                 Toast.makeText(context, "已添加并同步 ${newAcc.name}", Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
+
+    editingAccount?.let { original ->
+        AddServerDialog(
+            initialAccount = original,
+            onDismiss = { editingAccount = null },
+            onSaved = { updated ->
+                AccountManager.updateAccount(updated)
+                MediaLibraryManager.refresh()
+                editingAccount = null
+                Toast.makeText(context, "服务器配置已更新", Toast.LENGTH_SHORT).show()
             }
         )
     }
@@ -237,7 +282,21 @@ fun MediaLibrarySettings(
             onUpdate = { updated ->
                 AccountManager.updateAccount(updated)
                 MediaLibraryManager.refresh()
+                selectedAccountForManage = updated
+            },
+            onEdit = {
                 selectedAccountForManage = null
+                editingAccount = acc
+            },
+            onTest = {
+                scope.launch {
+                    val result = withContext(Dispatchers.IO) { providerFor(acc).testConnection() }
+                    Toast.makeText(
+                        context,
+                        result.fold({ "连接成功：$it" }, { "连接失败：${it.message}" }),
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
             },
             onDelete = {
                 AccountManager.removeAccount(acc.id)
@@ -246,6 +305,38 @@ fun MediaLibrarySettings(
                 Toast.makeText(context, "已移除媒体源", Toast.LENGTH_SHORT).show()
             }
         )
+    }
+}
+
+@Composable
+private fun LibraryPreferenceRow(
+    title: String,
+    description: String,
+    enabled: Boolean,
+    onToggle: (Boolean) -> Unit
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(ContinuousCornerShape(16.dp))
+            .background(if (focused) Color.White else Color(0x14FFFFFF))
+            .border(1.5.dp, if (focused) Color.White else Color(0x22FFFFFF), ContinuousCornerShape(16.dp))
+            .clickable(interactionSource = interaction, indication = null) { onToggle(!enabled) }
+            .focusable(interactionSource = interaction)
+            .padding(horizontal = 22.dp, vertical = 17.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = if (focused) Color.Black else White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Text(description, color = if (focused) Color(0xFF5A606D) else Color(0xFF9EA3AE), fontSize = 14.sp)
+        }
+        Box(
+            Modifier.width(64.dp).height(32.dp).clip(RoundedCornerShape(18.dp))
+                .background(if (enabled) Color(0xFF3875F6) else Color(0xFF4B5563)).padding(4.dp),
+            contentAlignment = if (enabled) Alignment.CenterEnd else Alignment.CenterStart
+        ) { Box(Modifier.size(24.dp).clip(CircleShape).background(Color.White)) }
     }
 }
 
@@ -457,16 +548,17 @@ private fun TvButton(
 
 @Composable
 private fun AddServerDialog(
+    initialAccount: MediaAccount?,
     onDismiss: () -> Unit,
     onSaved: (MediaAccount) -> Unit
 ) {
-    var selectedType by remember { mutableStateOf(ServerType.EMBY) }
-    var name by remember { mutableStateOf("我的 Emby") }
-    var host by remember { mutableStateOf("http://192.168.1.100:8096") }
-    var username by remember { mutableStateOf("") }
+    var selectedType by remember { mutableStateOf(initialAccount?.type ?: ServerType.EMBY) }
+    var name by remember { mutableStateOf(initialAccount?.name ?: "我的 Emby") }
+    var host by remember { mutableStateOf(initialAccount?.serverUrl ?: "http://192.168.1.100:8096") }
+    var username by remember { mutableStateOf(initialAccount?.username.orEmpty()) }
     var password by remember { mutableStateOf("") }
-    var token by remember { mutableStateOf("") }
-    var ignoreSsl by remember { mutableStateOf(true) }
+    var token by remember { mutableStateOf(initialAccount?.token.orEmpty()) }
+    var ignoreSsl by remember { mutableStateOf(initialAccount?.ignoreSslErrors ?: true) }
     var testStatus by remember { mutableStateOf<String?>(null) }
     var testing by remember { mutableStateOf(false) }
 
@@ -483,7 +575,7 @@ private fun AddServerDialog(
         ) {
             Column {
                 Text(
-                    "添加媒体服务器",
+                    if (initialAccount == null) "添加媒体服务器" else "编辑媒体服务器",
                     color = White,
                     fontSize = 26.sp,
                     fontWeight = FontWeight.Bold
@@ -566,6 +658,10 @@ private fun AddServerDialog(
                     TvButton(
                         text = if (testing) "测试中..." else "测试连接",
                         onClick = {
+                            if (!AccountManager.allowInsecureConnections.value && host.trim().startsWith("http://", true)) {
+                                testStatus = "失败: 当前禁止 HTTP，请改用 HTTPS 或在媒体库设置中允许"
+                                return@TvButton
+                            }
                             testing = true
                             testStatus = null
                             scope.launch {
@@ -577,17 +673,7 @@ private fun AddServerDialog(
                                     token = token,
                                     ignoreSslErrors = ignoreSsl
                                 )
-                                val provider = when (selectedType) {
-                                    ServerType.EMBY, ServerType.JELLYFIN -> {
-                                        val p = EmbyProvider(tempAcc)
-                                        if (password.isNotBlank()) {
-                                            p.authenticate(password)
-                                        }
-                                        p
-                                    }
-                                    ServerType.PLEX -> PlexProvider(tempAcc)
-                                    ServerType.WEBDAV_ALIST -> WebDavAlistProvider(tempAcc)
-                                }
+                                val provider = providerFor(tempAcc)
                                 val res = provider.testConnection()
                                 withContext(Dispatchers.Main) {
                                     testing = false
@@ -603,13 +689,21 @@ private fun AddServerDialog(
                         text = "保存并启用",
                         isPrimary = true,
                         onClick = {
+                            if (!AccountManager.allowInsecureConnections.value && host.trim().startsWith("http://", true)) {
+                                testStatus = "失败: 当前禁止 HTTP，请改用 HTTPS 或在媒体库设置中允许"
+                                return@TvButton
+                            }
                             scope.launch {
                                 var finalAcc = MediaAccount(
+                                    id = initialAccount?.id ?: java.util.UUID.randomUUID().toString(),
                                     name = name,
                                     type = selectedType,
                                     serverUrl = host,
                                     username = username,
                                     token = token,
+                                    userId = initialAccount?.userId.orEmpty(),
+                                    enabled = initialAccount?.enabled ?: true,
+                                    includeInAggregate = initialAccount?.includeInAggregate ?: true,
                                     ignoreSslErrors = ignoreSsl
                                 )
                                 if ((selectedType == ServerType.EMBY || selectedType == ServerType.JELLYFIN) && password.isNotBlank()) {
@@ -634,6 +728,8 @@ private fun AccountManageDialog(
     account: MediaAccount,
     onDismiss: () -> Unit,
     onUpdate: (MediaAccount) -> Unit,
+    onEdit: () -> Unit,
+    onTest: () -> Unit,
     onDelete: () -> Unit
 ) {
     Dialog(onDismissRequest = onDismiss) {
@@ -662,6 +758,22 @@ private fun AccountManageDialog(
                 Spacer(Modifier.height(24.dp))
 
                 // Toggle Enabled
+                ManageOptionRow(
+                    label = "编辑地址与凭据",
+                    value = "打开",
+                    onClick = onEdit
+                )
+
+                Spacer(Modifier.height(12.dp))
+
+                ManageOptionRow(
+                    label = "测试服务器连接",
+                    value = "立即测试",
+                    onClick = onTest
+                )
+
+                Spacer(Modifier.height(12.dp))
+
                 ManageOptionRow(
                     label = "启用此服务器",
                     value = if (account.enabled) "已开启" else "已停用",
@@ -706,6 +818,12 @@ private fun AccountManageDialog(
             }
         }
     }
+}
+
+private fun providerFor(account: MediaAccount): MediaSourceProvider = when (account.type) {
+    ServerType.EMBY, ServerType.JELLYFIN -> EmbyProvider(account)
+    ServerType.PLEX -> PlexProvider(account)
+    ServerType.WEBDAV_ALIST -> WebDavAlistProvider(account)
 }
 
 @Composable

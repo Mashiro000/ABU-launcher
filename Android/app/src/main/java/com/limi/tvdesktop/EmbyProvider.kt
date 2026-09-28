@@ -10,6 +10,7 @@ import org.json.JSONObject
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
+import java.time.Instant
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
@@ -94,9 +95,9 @@ class EmbyProvider(override var account: MediaAccount) : MediaSourceProvider {
         runCatching {
             val userId = account.userId
             val url = if (userId.isNotBlank()) {
-                "$baseUrl/Users/$userId/Items/Resume?Limit=12&Recursive=true&Fields=Overview,PrimaryImageAspectRatio"
+                "$baseUrl/Users/$userId/Items/Resume?Limit=12&Recursive=true&Fields=Overview,PrimaryImageAspectRatio,Taglines,ImageTags,BackdropImageTags,ParentLogoItemId,ParentBackdropItemId,SeriesId,UserData,Genres,MediaSources"
             } else {
-                "$baseUrl/Items?Limit=12&Recursive=true&SortBy=DatePlayed&SortOrder=Descending&Filters=IsResumable&Fields=Overview"
+                "$baseUrl/Items?Limit=12&Recursive=true&SortBy=DatePlayed&SortOrder=Descending&Filters=IsResumable&Fields=Overview,Taglines,ImageTags,BackdropImageTags,ParentLogoItemId,ParentBackdropItemId,SeriesId,UserData,Genres"
             }
             val req = request(url)
             val resp = client.newCall(req).execute()
@@ -111,9 +112,9 @@ class EmbyProvider(override var account: MediaAccount) : MediaSourceProvider {
         runCatching {
             val userId = account.userId
             val url = if (userId.isNotBlank()) {
-                "$baseUrl/Users/$userId/Items/Latest?Limit=16&Fields=Overview,PrimaryImageAspectRatio"
+                "$baseUrl/Users/$userId/Items/Latest?Limit=16&Fields=Overview,PrimaryImageAspectRatio,Taglines,ImageTags,BackdropImageTags,ParentLogoItemId,ParentBackdropItemId,SeriesId,UserData,Genres"
             } else {
-                "$baseUrl/Items?Limit=16&Recursive=true&SortBy=DateCreated&SortOrder=Descending&Fields=Overview"
+                "$baseUrl/Items?Limit=16&Recursive=true&SortBy=DateCreated&SortOrder=Descending&Fields=Overview,Taglines,ImageTags,BackdropImageTags,ParentLogoItemId,ParentBackdropItemId,SeriesId,UserData,Genres"
             }
             val req = request(url)
             val resp = client.newCall(req).execute()
@@ -121,6 +122,39 @@ class EmbyProvider(override var account: MediaAccount) : MediaSourceProvider {
             val items = JSONArray(resp.body?.string().orEmpty())
             parseItems(items)
         }.getOrDefault(emptyList())
+    }
+
+    override suspend fun getFavorites(): List<MediaItemInfo> = withContext(Dispatchers.IO) {
+        runCatching {
+            val userId = account.userId
+            val url = if (userId.isNotBlank()) {
+                "$baseUrl/Users/$userId/Items?Filters=IsFavorite&Recursive=true&IncludeItemTypes=Movie,Series,Episode,Video&Limit=30&Fields=Overview,PrimaryImageAspectRatio,Taglines,ImageTags,BackdropImageTags,ParentLogoItemId,ParentBackdropItemId,SeriesId,UserData,Genres"
+            } else {
+                "$baseUrl/Items?Filters=IsFavorite&Recursive=true&IncludeItemTypes=Movie,Series,Episode,Video&Limit=30&Fields=Overview,Taglines,ImageTags,BackdropImageTags,ParentLogoItemId,ParentBackdropItemId,SeriesId,UserData,Genres"
+            }
+            val req = request(url)
+            val resp = client.newCall(req).execute()
+            if (!resp.isSuccessful) return@runCatching emptyList()
+            val json = JSONObject(resp.body?.string().orEmpty())
+            val items = json.optJSONArray("Items") ?: JSONArray()
+            parseItems(items)
+        }.getOrDefault(emptyList())
+    }
+
+    override suspend fun setFavorite(itemId: String, isFavorite: Boolean): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val userId = account.userId
+            val url = if (userId.isNotBlank()) {
+                "$baseUrl/Users/$userId/FavoriteItems/$itemId"
+            } else {
+                "$baseUrl/FavoriteItems/$itemId"
+            }
+            val method = if (isFavorite) "POST" else "DELETE"
+            val body = if (isFavorite) "".toRequestBody("application/json".toMediaType()) else null
+            val req = request(url, method, body)
+            val resp = client.newCall(req).execute()
+            resp.isSuccessful
+        }.getOrDefault(false)
     }
 
     override suspend fun getCategories(): List<MediaCategoryInfo> = withContext(Dispatchers.IO) {
@@ -135,12 +169,15 @@ class EmbyProvider(override var account: MediaAccount) : MediaSourceProvider {
             val list = mutableListOf<MediaCategoryInfo>()
             for (i in 0 until items.length()) {
                 val obj = items.getJSONObject(i)
+                val catId = obj.optString("Id")
                 list.add(
                     MediaCategoryInfo(
-                        id = obj.optString("Id"),
+                        id = catId,
                         title = obj.optString("Name"),
                         collectionType = obj.optString("CollectionType", "movies"),
-                        accountId = account.id
+                        thumbUrl = "$baseUrl/Items/$catId/Images/Primary?quality=80&maxWidth=600&api_key=${account.token}",
+                        accountId = account.id,
+                        primaryImageAspectRatio = obj.optDouble("PrimaryImageAspectRatio", 0.0).toFloat()
                     )
                 )
             }
@@ -148,23 +185,35 @@ class EmbyProvider(override var account: MediaAccount) : MediaSourceProvider {
         }.getOrDefault(emptyList())
     }
 
-    override suspend fun getCategoryItems(categoryId: String): List<MediaItemInfo> = withContext(Dispatchers.IO) {
+    override suspend fun getCategoryItems(categoryId: String): List<MediaItemInfo> =
+        getCategoryItemsPage(categoryId, 0, 60).items
+
+    override suspend fun getCategoryItemsPage(categoryId: String, startIndex: Int, limit: Int): MediaPage = withContext(Dispatchers.IO) {
         runCatching {
             val userId = account.userId
-            val url = "$baseUrl/Users/$userId/Items?ParentId=$categoryId&Limit=30&Recursive=true&SortBy=SortName&Fields=Overview,PrimaryImageAspectRatio"
+            // Recursive=true alone also returns every Episode; the poster wall must only show
+            // library-level items (Series/Movie/...) so it uses portrait posters, not episode stills.
+            val includeTypes = "Movie,Series,Video,BoxSet,MusicAlbum,Audio,Photo"
+            val url = "$baseUrl/Users/$userId/Items?ParentId=$categoryId&StartIndex=$startIndex&Limit=$limit&Recursive=true&SortBy=SortName&IncludeItemTypes=$includeTypes&Fields=Overview,PrimaryImageAspectRatio,Taglines,ImageTags,BackdropImageTags,ParentLogoItemId,ParentBackdropItemId,SeriesId,UserData,Genres"
             val req = request(url)
             val resp = client.newCall(req).execute()
-            if (!resp.isSuccessful) return@runCatching emptyList()
+            if (!resp.isSuccessful) return@runCatching MediaPage(emptyList(), startIndex)
             val json = JSONObject(resp.body?.string().orEmpty())
-            val items = json.optJSONArray("Items") ?: JSONArray()
-            parseItems(items)
-        }.getOrDefault(emptyList())
+            MediaPage(
+                items = parseItems(json.optJSONArray("Items") ?: JSONArray()),
+                totalCount = json.optInt("TotalRecordCount", 0)
+            )
+        }.getOrDefault(MediaPage(emptyList(), startIndex))
     }
 
     override suspend fun getEpisodes(seriesId: String): List<EpisodeInfo> = withContext(Dispatchers.IO) {
         runCatching {
             val userId = account.userId
-            val url = "$baseUrl/Shows/$seriesId/Episodes?UserId=$userId&Fields=Overview,PrimaryImageAspectRatio"
+            val url = if (userId.isNotBlank()) {
+                "$baseUrl/Shows/$seriesId/Episodes?UserId=$userId&Fields=Overview,PrimaryImageAspectRatio,MediaSources"
+            } else {
+                "$baseUrl/Shows/$seriesId/Episodes?Fields=Overview,PrimaryImageAspectRatio,MediaSources"
+            }
             val req = request(url)
             val resp = client.newCall(req).execute()
             if (!resp.isSuccessful) return@runCatching emptyList()
@@ -189,12 +238,129 @@ class EmbyProvider(override var account: MediaAccount) : MediaSourceProvider {
                         thumbUrl = "$baseUrl/Items/$itemId/Images/Primary?quality=80&maxWidth=500&api_key=${account.token}",
                         streamUrl = getStreamUrl(itemId),
                         playbackPositionMs = playedTicks / 10_000,
-                        durationMs = ticks / 10_000
+                        durationMs = ticks / 10_000,
+                        mediaSource = obj.optJSONArray("MediaSources")?.optJSONObject(0)?.let { parseSource(it) }
                     )
                 )
             }
             list
         }.getOrDefault(emptyList())
+    }
+
+    override suspend fun getItemDetail(itemId: String): MediaDetailInfo? = withContext(Dispatchers.IO) {
+        runCatching {
+            val userId = account.userId
+            val fields = "Overview,Taglines,Genres,Studios,People,MediaSources,OfficialRating,PremiereDate," +
+                "ProductionYear,CommunityRating,RunTimeTicks,ChildCount,RecursiveItemCount,Type,OriginalTitle,ProductionLocations"
+            val url = if (userId.isNotBlank()) "$baseUrl/Users/$userId/Items/$itemId?Fields=$fields"
+            else "$baseUrl/Items/$itemId?Fields=$fields"
+            val resp = client.newCall(request(url)).execute()
+            if (!resp.isSuccessful) return@runCatching null
+            parseDetail(JSONObject(resp.body?.string().orEmpty()))
+        }.getOrNull()
+    }
+
+    override suspend fun getSimilar(itemId: String): List<MediaItemInfo> = withContext(Dispatchers.IO) {
+        runCatching {
+            val userId = account.userId
+            val url = "$baseUrl/Items/$itemId/Similar?UserId=$userId&Limit=12&Fields=Overview,PrimaryImageAspectRatio," +
+                "Taglines,ImageTags,BackdropImageTags,ParentLogoItemId,ParentBackdropItemId,SeriesId,UserData,Genres"
+            val resp = client.newCall(request(url)).execute()
+            if (!resp.isSuccessful) return@runCatching emptyList()
+            val json = JSONObject(resp.body?.string().orEmpty())
+            parseItems(json.optJSONArray("Items") ?: JSONArray())
+        }.getOrDefault(emptyList())
+    }
+
+    private fun parseDetail(obj: JSONObject): MediaDetailInfo {
+        val people = mutableListOf<PersonInfo>()
+        obj.optJSONArray("People")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val p = arr.optJSONObject(i) ?: continue
+                val pid = p.optString("Id")
+                val hasImage = p.optString("PrimaryImageTag").isNotBlank()
+                people.add(
+                    PersonInfo(
+                        id = pid,
+                        name = p.optString("Name"),
+                        role = p.optString("Role"),
+                        type = p.optString("Type"),
+                        imageUrl = if (pid.isNotBlank() && hasImage) {
+                            "$baseUrl/Items/$pid/Images/Primary?maxWidth=240&quality=90&api_key=${account.token}"
+                        } else ""
+                    )
+                )
+            }
+        }
+        val genres = obj.optJSONArray("Genres")?.let { arr -> (0 until arr.length()).map { arr.optString(it) } }.orEmpty()
+        val studios = obj.optJSONArray("Studios")?.let { arr ->
+            (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.optString("Name")?.ifBlank { null } }
+        }.orEmpty()
+        val countries = obj.optJSONArray("ProductionLocations")?.let { arr ->
+            (0 until arr.length()).map { arr.optString(it) }
+        }.orEmpty()
+        val rating = obj.optDouble("CommunityRating", 0.0)
+        return MediaDetailInfo(
+            originalTitle = obj.optString("OriginalTitle"),
+            overview = obj.optString("Overview"),
+            premiereDate = obj.optString("PremiereDate").take(10),
+            officialRating = obj.optString("OfficialRating"),
+            communityRating = if (rating > 0.0) (kotlin.math.round(rating * 10) / 10.0).toString() else "",
+            productionYear = obj.optString("ProductionYear"),
+            runtimeMs = obj.optLong("RunTimeTicks", 0L) / 10_000,
+            genres = genres,
+            studios = studios,
+            countries = countries,
+            status = obj.optString("Status"),
+            recursiveItemCount = obj.optInt("RecursiveItemCount", 0),
+            people = people,
+            mediaSource = obj.optJSONArray("MediaSources")?.optJSONObject(0)?.let { parseSource(it) }
+        )
+    }
+
+    private fun parseSource(obj: JSONObject): MediaSourceInfo {
+        val streams = obj.optJSONArray("MediaStreams")
+        var video: MediaStreamInfo? = null
+        val audios = mutableListOf<MediaStreamInfo>()
+        val subtitles = mutableListOf<MediaStreamInfo>()
+        if (streams != null) {
+            for (i in 0 until streams.length()) {
+                val s = streams.optJSONObject(i) ?: continue
+                val rawDeliveryUrl = s.optString("DeliveryUrl")
+                val deliveryUrl = when {
+                    rawDeliveryUrl.isBlank() -> ""
+                    rawDeliveryUrl.startsWith("http://") || rawDeliveryUrl.startsWith("https://") -> rawDeliveryUrl
+                    else -> baseUrl.trimEnd('/') + "/" + rawDeliveryUrl.trimStart('/') +
+                        (if (rawDeliveryUrl.contains("api_key=")) "" else if (rawDeliveryUrl.contains('?')) "&api_key=${account.token}" else "?api_key=${account.token}")
+                }
+                val info = MediaStreamInfo(
+                    type = s.optString("Type"),
+                    displayTitle = s.optString("DisplayTitle"),
+                    codec = s.optString("Codec"),
+                    width = s.optInt("Width", 0),
+                    height = s.optInt("Height", 0),
+                    channels = s.optInt("Channels", 0),
+                    language = s.optString("Language"),
+                    index = s.optInt("Index", i),
+                    isExternal = s.optBoolean("IsExternal", false),
+                    deliveryUrl = deliveryUrl
+                )
+                when (info.type) {
+                    "Video" -> if (video == null) video = info
+                    "Audio" -> audios.add(info)
+                    "Subtitle" -> subtitles.add(info)
+                }
+            }
+        }
+        return MediaSourceInfo(
+            container = obj.optString("Container"),
+            name = obj.optString("Name"),
+            sizeBytes = obj.optLong("Size", 0L),
+            runTimeMs = obj.optLong("RunTimeTicks", 0L) / 10_000,
+            video = video,
+            audios = audios,
+            subtitles = subtitles
+        )
     }
 
     override suspend fun getStreamUrl(itemId: String): String {
@@ -228,20 +394,83 @@ class EmbyProvider(override var account: MediaAccount) : MediaSourceProvider {
             val name = obj.optString("Name")
             val type = obj.optString("Type", "Movie")
             val year = obj.optString("ProductionYear", "")
+            val seriesName = obj.optString("SeriesName")
+            val seriesId = obj.optString("SeriesId").ifBlank { if (type == "Series") id else null }
+            val seasonId = obj.optString("SeasonId").ifBlank { null }
+            val seasonNumber = obj.optInt("ParentIndexNumber", 1)
+            val episodeNumber = obj.optInt("IndexNumber", 1)
+
             val detail = when (type) {
                 "Episode" -> {
-                    val s = obj.optInt("ParentIndexNumber", 1)
-                    val e = obj.optInt("IndexNumber", 1)
-                    "${obj.optString("SeriesName")} S${s}E$e"
+                    val sName = if (seriesName.isNotBlank()) seriesName else name
+                    "$sName S${seasonNumber}E$episodeNumber"
                 }
                 "Series" -> if (year.isNotBlank()) "$year · 电视剧" else "电视剧"
                 "Movie" -> if (year.isNotBlank()) "$year · 电影" else "电影"
                 else -> type
             }
+
             val userData = obj.optJSONObject("UserData")
             val playedTicks = userData?.optLong("PlaybackPositionTicks", 0L) ?: 0L
             val totalTicks = obj.optLong("RunTimeTicks", 0L)
             val progress = if (totalTicks > 0) (playedTicks.toFloat() / totalTicks.toFloat()).coerceIn(0f, 1f) else 0f
+            val isFavorite = userData?.optBoolean("IsFavorite", false) ?: false
+            val lastPlayedAtMs = userData?.optString("LastPlayedDate")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrDefault(0L) }
+                ?: 0L
+
+            // Tagline & Overview
+            val taglines = obj.optJSONArray("Taglines")
+            var tagline = if (taglines != null && taglines.length() > 0) taglines.optString(0, "") else ""
+            val overview = obj.optString("Overview")
+            if (tagline.isBlank() && overview.isNotBlank()) {
+                val firstSentence = overview.split('。', '！', '!', '.', '\n').firstOrNull { it.isNotBlank() }?.trim() ?: overview
+                tagline = if (firstSentence.length > 35) firstSentence.take(35) + "..." else firstSentence
+            }
+
+            // ClearLogo URL
+            val imageTags = obj.optJSONObject("ImageTags")
+            val hasLogo = imageTags?.has("Logo") == true
+            val parentLogoItemId = obj.optString("ParentLogoItemId").ifBlank { null }
+            val logoItemId = when {
+                hasLogo -> id
+                !parentLogoItemId.isNullOrBlank() -> parentLogoItemId
+                !seriesId.isNullOrBlank() -> seriesId
+                else -> null
+            }
+            val logoUrl = if (logoItemId != null) {
+                "$baseUrl/Items/$logoItemId/Images/Logo?quality=90&maxWidth=800&api_key=${account.token}"
+            } else ""
+
+            // Backdrop URL
+            val backdropImageTags = obj.optJSONArray("BackdropImageTags")
+            val hasBackdrop = (backdropImageTags != null && backdropImageTags.length() > 0) || imageTags?.has("Backdrop") == true
+            val parentBackdropItemId = obj.optString("ParentBackdropItemId").ifBlank { null }
+            val backdropItemId = when {
+                hasBackdrop -> id
+                !parentBackdropItemId.isNullOrBlank() -> parentBackdropItemId
+                !seriesId.isNullOrBlank() -> seriesId
+                else -> id
+            }
+            val backdropUrl = "$baseUrl/Items/$backdropItemId/Images/Backdrop?quality=85&maxWidth=1920&api_key=${account.token}"
+
+            // Genres & CollectionType
+            val genres = obj.optJSONArray("Genres")
+            val genreList = mutableListOf<String>()
+            if (genres != null) {
+                for (g in 0 until genres.length()) {
+                    genreList.add(genres.optString(g))
+                }
+            }
+            val genreStr = genreList.joinToString(" / ")
+            val isAnime = genreList.any { it.contains("动画") || it.contains("动漫") || it.equals("Anime", ignoreCase = true) }
+            val collectionType = when {
+                isAnime -> "anime"
+                type == "Series" || type == "Episode" -> "tvshows"
+                type == "Movie" -> "movies"
+                else -> "movies"
+            }
 
             result.add(
                 MediaItemInfo(
@@ -250,17 +479,26 @@ class EmbyProvider(override var account: MediaAccount) : MediaSourceProvider {
                     serverType = account.type,
                     title = name,
                     detail = detail,
-                    overview = obj.optString("Overview"),
+                    overview = overview,
+                    tagline = tagline,
+                    logoUrl = logoUrl,
                     posterUrl = "$baseUrl/Items/$id/Images/Primary?quality=85&maxWidth=600&api_key=${account.token}",
-                    backdropUrl = "$baseUrl/Items/$id/Images/Backdrop?quality=85&maxWidth=1920&api_key=${account.token}",
+                    backdropUrl = backdropUrl,
                     progress = progress,
                     playbackPositionMs = playedTicks / 10_000,
                     totalDurationMs = totalTicks / 10_000,
+                    lastPlayedAtMs = lastPlayedAtMs,
                     mediaType = type,
+                    collectionType = collectionType,
                     year = year,
                     rating = obj.optString("CommunityRating", ""),
-                    seriesId = if (type == "Episode") obj.optString("SeriesId") else if (type == "Series") id else null,
-                    streamUrl = "$baseUrl/Videos/$id/stream.mp4?static=true&api_key=${account.token}"
+                    genre = genreStr,
+                    isFavorite = isFavorite,
+                    seriesId = seriesId,
+                    seasonId = seasonId,
+                    seasonNumber = seasonNumber,
+                    episodeNumber = episodeNumber,
+                    streamUrl = "$baseUrl/Videos/$id/stream.mp4?static=${AccountManager.preferDirectPlay.value}&api_key=${account.token}"
                 )
             )
         }

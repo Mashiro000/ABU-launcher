@@ -14,13 +14,22 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -32,14 +41,22 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import dev.chrisbanes.haze.*
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -81,6 +98,9 @@ internal enum class SettingsCategory(
 
 private fun itemsFor(category: SettingsCategory, context: Context): List<Pair<String, String?>> = when (category) {
     SettingsCategory.DESKTOP -> listOf(
+        "低性能模式" to if (RenderPerformance.lowPerformance) "已开启 · 精简动画与合成，优先流畅" else if (RenderPerformance.reducedEffects) "安卓 9 自动兼容 · 精简动画" else "已关闭 · 点击开启，优先流畅",
+        "静态模糊" to if (RenderPerformance.staticBlurEnabled) "已开启（推荐）· 预生成一次，移动时不重复模糊" else "已关闭 · 使用实时模糊（性能要求较高）",
+        "玻璃与模糊" to "导航条、Dock 与应用列表的模糊度和不透明度",
         "壁纸" to "自定义壁纸来源与预览",
         "启动动画" to LaunchAnim.current(context).label,
         "图标大小" to DesktopPreferences.IconScale.current(context).label,
@@ -91,6 +111,7 @@ private fun itemsFor(category: SettingsCategory, context: Context): List<Pair<St
         "开机自启动" to if (DesktopPreferences.AutoStart.isEnabled(context)) "已开启" else "已关闭"
     )
     SettingsCategory.PLAYER -> listOf(
+        "默认播放器" to DesktopPreferences.PlaybackEngine.current(context).label,
         "硬件加速解码" to "优先开启",
         "字幕默认样式" to "白色无阴影",
         "音轨优先" to "国语 / 原声",
@@ -108,7 +129,7 @@ private fun itemsFor(category: SettingsCategory, context: Context): List<Pair<St
         "系统语言" to "简体中文",
         "设备存储空间" to "可用 48.6 GB / 64 GB",
         "软件版本号" to "0.1.0-tvOS",
-        "开发者选项" to "已就绪"
+        "开发者选项" to "性能测试、遥控器与设备诊断"
     )
 }
 
@@ -128,6 +149,7 @@ private fun openDefaultHomeSettings(context: Context) {
 @OptIn(ExperimentalHazeApi::class)
 internal fun SettingsPage(
     haze: HazeState? = null,
+    staticBlur: ImageBitmap? = null,
     onClose: () -> Unit,
     onWallpaperChanged: () -> Unit
 ) {
@@ -165,13 +187,13 @@ internal fun SettingsPage(
             .fillMaxSize()
             .zIndex(200f)
             .then(
-                if (Build.VERSION.SDK_INT >= 31 && haze != null) {
+                if (RenderPerformance.blur31 && haze != null) {
                     Modifier.hazeEffect(haze) {
                         blurRadius = 64.dp
                         backgroundColor = Color.Transparent
                         tints = listOf(HazeTint(Color(0xD90E1116)))
                         noiseFactor = 0f
-                        inputScale = HazeInputScale.Fixed(0.5f)
+                        inputScale = HazeInputScale.Fixed(0.35f)
                     }
                 } else {
                     // Fallback static high-blur styling for lower Android versions
@@ -202,6 +224,10 @@ internal fun SettingsPage(
             .focusProperties { onExit = { cancelFocusChange() } }
             .focusGroup()
     ) {
+        if (RenderPerformance.staticBlur && staticBlur != null) {
+            Image(staticBlur, null, Modifier.matchParentSize(), contentScale = ContentScale.Crop)
+            Box(Modifier.matchParentSize().background(Color(0xD90E1116)))
+        }
         Row(
             Modifier
                 .fillMaxSize()
@@ -234,6 +260,16 @@ internal fun SettingsPage(
                         },
                         onWallpaperChanged = ::notifyDesktopChanged,
                         returnRequester = leftRequesters[category]
+                    )
+                    "glass_tuning" -> GlassTuningSettings(
+                        onBack = { detail = null; leftRequesters[category]?.requestFocus() },
+                        onChanged = ::notifyDesktopChanged,
+                        returnRequester = leftRequesters[category]
+                    )
+                    "developer" -> DeveloperSettings(
+                        onBack = { detail = null; leftRequesters[category]?.requestFocus() },
+                        returnRequester = leftRequesters[category],
+                        onTestDesktop = onClose
                     )
                     "animation" -> AnimationSettings(
                         onBack = {
@@ -289,19 +325,36 @@ internal fun SettingsPage(
                         },
                         returnRequester = leftRequesters[category]
                     )
+                    "playback_engine" -> PlaybackEngineSettings(
+                        onBack = { detail = null; leftRequesters[category]?.requestFocus() },
+                        onChanged = ::notifyDesktopChanged,
+                        returnRequester = leftRequesters[category]
+                    )
                     else -> CategoryItems(
                         category = category,
                         refreshKey = refreshTick,
                         firstRequester = rightFirstRequester,
                         leftReturnRequester = leftRequesters[category],
                         onWallpaper = { detail = "wallpaper" },
+                        onGlassTuning = { detail = "glass_tuning" },
                         onAnimation = { detail = "animation" },
+                        onDeveloper = { detail = "developer" },
                         onIconScale = { detail = "icon_scale" },
                         onClockStyle = { detail = "clock_style" },
                         onDockStyle = { detail = "dock_style" },
                         onGridDensity = { detail = "grid_density" },
                         onScreenSaver = { detail = "screensaver" },
                         onMediaLibrary = { detail = "media_library" },
+                        onPlaybackEngine = { detail = "playback_engine" },
+                        onToggleLowPerformance = {
+                            if (DeveloperDiagnostics.remaining > 0) DeveloperDiagnostics.finish("渲染模式改变，测试提前结束")
+                            RenderPerformance.setEnabled(context, !RenderPerformance.lowPerformance)
+                            refreshTick++
+                        },
+                        onToggleStaticBlur = {
+                            RenderPerformance.setStaticBlur(context, !RenderPerformance.staticBlurEnabled)
+                            notifyDesktopChanged()
+                        },
                         onToggleAutoStart = {
                             val cur = DesktopPreferences.AutoStart.isEnabled(context)
                             DesktopPreferences.AutoStart.setEnabled(context, !cur)
@@ -473,64 +526,93 @@ private fun CategoryItems(
     firstRequester: FocusRequester,
     leftReturnRequester: FocusRequester?,
     onWallpaper: () -> Unit,
+    onGlassTuning: () -> Unit,
     onAnimation: () -> Unit,
+    onDeveloper: () -> Unit,
     onIconScale: () -> Unit,
     onClockStyle: () -> Unit,
     onDockStyle: () -> Unit,
     onGridDensity: () -> Unit,
     onScreenSaver: () -> Unit,
     onMediaLibrary: () -> Unit,
+    onPlaybackEngine: () -> Unit,
+    onToggleLowPerformance: () -> Unit,
+    onToggleStaticBlur: () -> Unit,
     onToggleAutoStart: () -> Unit,
     onDefaultHome: () -> Unit
 ) {
     val context = LocalContext.current
-    val items = remember(category, refreshKey) { itemsFor(category, context) }
+    val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val listState = rememberLazyListState()
+    val items = remember(category, refreshKey, RenderPerformance.lowPerformance, RenderPerformance.staticBlurEnabled) { itemsFor(category, context) }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(top = 12.dp, bottom = 40.dp)
+    LazyColumn(
+        state = listState,
+        modifier = Modifier
+            .fillMaxSize(),
+        contentPadding = PaddingValues(top = 28.dp, bottom = 40.dp)
     ) {
-        Text(
-            category.label,
-            color = White,
-            fontSize = 36.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
-        Text(
-            category.subtitle,
-            color = Color(0xFFA5ACB8),
-            fontSize = 18.sp,
-            modifier = Modifier.padding(bottom = 28.dp)
-        )
+        item(key = "heading-${category.name}") {
+            Text(category.label, color = White, fontSize = 36.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp))
+            Text(category.subtitle, color = Color(0xFFA5ACB8), fontSize = 18.sp, modifier = Modifier.padding(bottom = 28.dp))
+            SettingsSectionTitle("偏好选项")
+        }
 
-        SettingsSectionTitle("偏好选项")
-
-        items.forEachIndexed { idx, (label, subtitle) ->
+        itemsIndexed(items, key = { _, item -> item.first }) { idx, (label, subtitle) ->
             val isFirst = idx == 0
             val onClick: () -> Unit = when {
+                label == "低性能模式" -> onToggleLowPerformance
+                label == "静态模糊" -> onToggleStaticBlur
+                label == "玻璃与模糊" -> onGlassTuning
                 label == "壁纸" -> onWallpaper
                 label == "启动动画" -> onAnimation
+                label == "开发者选项" -> onDeveloper
                 label == "图标大小" -> onIconScale
                 label == "时钟样式" -> onClockStyle
                 label == "Dock 布局" -> onDockStyle
                 label == "网格密度" -> onGridDensity
                 label == "屏幕保护" -> onScreenSaver
+                label == "默认播放器" -> onPlaybackEngine
                 category == SettingsCategory.LIBRARY -> onMediaLibrary
                 label == "开机自启动" -> onToggleAutoStart
                 label == "设置默认桌面" -> onDefaultHome
                 else -> ({})
             }
 
-            SettingsRowItem(
-                label = label,
-                value = subtitle,
-                focusRequester = if (isFirst) firstRequester else null,
-                leftReturnRequester = leftReturnRequester,
-                onClick = onClick
-            )
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .onFocusChanged { focusState ->
+                        if (focusState.hasFocus) {
+                            scope.launch {
+                                // LazyColumn performs its own focus relocation first. Correct its
+                                // final position afterwards so the scaled card never rests against
+                                // (or behind) the clipped top/bottom edge of the viewport.
+                                delay(90)
+                                val info = listState.layoutInfo.visibleItemsInfo
+                                    .firstOrNull { it.index == idx + 1 } ?: return@launch
+                                val margin = with(density) { 18.dp.toPx() }
+                                val safeTop = margin
+                                val safeBottom = listState.layoutInfo.viewportSize.height - margin
+                                val delta = when {
+                                    info.offset < safeTop -> info.offset - safeTop
+                                    info.offset + info.size > safeBottom -> info.offset + info.size - safeBottom
+                                    else -> 0f
+                                }
+                                if (delta != 0f) listState.animateScrollBy(delta)
+                            }
+                        }
+                    }
+            ) {
+                SettingsRowItem(
+                    label = label,
+                    value = subtitle,
+                    focusRequester = if (isFirst) firstRequester else null,
+                    leftReturnRequester = leftReturnRequester,
+                    onClick = onClick
+                )
+            }
             Spacer(Modifier.height(10.dp))
         }
     }
@@ -547,6 +629,104 @@ internal fun SettingsSectionTitle(text: String) {
     )
 }
 
+@Composable
+private fun GlassTuningSettings(
+    onBack: () -> Unit,
+    onChanged: () -> Unit,
+    returnRequester: FocusRequester?
+) {
+    val context = LocalContext.current
+    val back = remember { FocusRequester() }
+    var navBlur by remember { mutableFloatStateOf(DesktopPreferences.GlassTuning.navBlur(context)) }
+    var navOpacity by remember { mutableFloatStateOf(DesktopPreferences.GlassTuning.navOpacity(context)) }
+    var dockBlur by remember { mutableFloatStateOf(DesktopPreferences.GlassTuning.dockBlur(context)) }
+    var dockOpacity by remember { mutableFloatStateOf(DesktopPreferences.GlassTuning.dockOpacity(context)) }
+    var appBlur by remember { mutableFloatStateOf(DesktopPreferences.GlassTuning.appListBlur(context)) }
+    var appOpacity by remember { mutableFloatStateOf(DesktopPreferences.GlassTuning.appListOpacity(context)) }
+
+    BackHandler(onBack = onBack)
+    LaunchedEffect(Unit) { back.requestFocus() }
+
+    fun save(key: String, value: Float) {
+        DesktopPreferences.GlassTuning.save(context, key, value)
+        onChanged()
+    }
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 20.dp, bottom = 120.dp)) {
+        SettingsRowItem("← 返回桌面设置", null, back, returnRequester, onBack)
+        Spacer(Modifier.height(22.dp))
+        Text("玻璃与模糊", color = White, fontSize = 34.sp, fontWeight = FontWeight.Bold)
+        Text("触屏拖动；遥控器、键盘和手柄使用左右键微调", color = Color(0xFFA5ACB8), fontSize = 16.sp, modifier = Modifier.padding(top = 6.dp, bottom = 24.dp))
+
+        SettingsSectionTitle("顶部导航条")
+        GlassSliderRow("模糊度", navBlur, 0f..60f, "${navBlur.toInt()} dp", onValue = { navBlur = it }, onCommit = { save("glassNavBlur", it) }, onReset = { navBlur = DesktopPreferences.GlassTuning.NAV_BLUR_DEFAULT; DesktopPreferences.GlassTuning.reset(context, "glassNavBlur"); onChanged() })
+        GlassSliderRow("不透明度", navOpacity, 0f..0.9f, "${(navOpacity * 100).toInt()}%", step = .05f, onValue = { navOpacity = it }, onCommit = { save("glassNavOpacity", it) }, onReset = { navOpacity = DesktopPreferences.GlassTuning.NAV_OPACITY_DEFAULT; DesktopPreferences.GlassTuning.reset(context, "glassNavOpacity"); onChanged() })
+
+        SettingsSectionTitle("Dock 栏")
+        GlassSliderRow("模糊度", dockBlur, 0f..60f, "${dockBlur.toInt()} dp", onValue = { dockBlur = it }, onCommit = { save("glassDockBlur", it) }, onReset = { dockBlur = DesktopPreferences.GlassTuning.DOCK_BLUR_DEFAULT; DesktopPreferences.GlassTuning.reset(context, "glassDockBlur"); onChanged() })
+        GlassSliderRow("不透明度", dockOpacity, 0f..0.9f, "${(dockOpacity * 100).toInt()}%", step = .05f, onValue = { dockOpacity = it }, onCommit = { save("glassDockOpacity", it) }, onReset = { dockOpacity = DesktopPreferences.GlassTuning.DOCK_OPACITY_DEFAULT; DesktopPreferences.GlassTuning.reset(context, "glassDockOpacity"); onChanged() })
+
+        SettingsSectionTitle("进入应用列表后的背景")
+        GlassSliderRow("背景模糊度", appBlur, 0f..80f, "${appBlur.toInt()} dp", onValue = { appBlur = it }, onCommit = { save("glassAppListBlur", it) }, onReset = { appBlur = DesktopPreferences.GlassTuning.APP_LIST_BLUR_DEFAULT; DesktopPreferences.GlassTuning.reset(context, "glassAppListBlur"); onChanged() })
+        GlassSliderRow("背景不透明度", appOpacity, 0f..0.9f, "${(appOpacity * 100).toInt()}%", step = .05f, onValue = { appOpacity = it }, onCommit = { save("glassAppListOpacity", it) }, onReset = { appOpacity = DesktopPreferences.GlassTuning.APP_LIST_OPACITY_DEFAULT; DesktopPreferences.GlassTuning.reset(context, "glassAppListOpacity"); onChanged() })
+    }
+}
+
+@Composable
+private fun GlassSliderRow(
+    title: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    valueText: String,
+    step: Float = 2f,
+    onValue: (Float) -> Unit,
+    onCommit: (Float) -> Unit,
+    onReset: () -> Unit
+) {
+    val bringIntoView = remember { BringIntoViewRequester() }
+    val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    var rowSize by remember { mutableStateOf(IntSize.Zero) }
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp)
+            .bringIntoViewRequester(bringIntoView)
+            .onSizeChanged { rowSize = it }
+            .onFocusChanged {
+                if (it.hasFocus) scope.launch {
+                    delay(40)
+                    with(density) {
+                        bringIntoView.bringIntoView(
+                            Rect(0f, -12.dp.toPx(), rowSize.width.toFloat(), rowSize.height + 12.dp.toPx())
+                        )
+                    }
+                }
+            },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f).clip(ContinuousCornerShape(16.dp)).background(Color(0x16FFFFFF)).padding(horizontal = 20.dp, vertical = 14.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(title, color = White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text(valueText, color = Color(0xFF78A7FF), fontSize = 17.sp)
+            }
+            Slider(
+                value = value,
+                onValueChange = onValue,
+                onValueChangeFinished = { onCommit(value) },
+                valueRange = range,
+                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color(0xFF4A89FF), inactiveTrackColor = Color(0x405E6775)),
+                modifier = Modifier.fillMaxWidth().onPreviewKeyEvent { event ->
+                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    val delta = when (event.key) { Key.DirectionLeft -> -step; Key.DirectionRight -> step; else -> return@onPreviewKeyEvent false }
+                    val next = (value + delta).coerceIn(range.start, range.endInclusive)
+                    onValue(next); onCommit(next); true
+                }
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Box(Modifier.width(170.dp)) { SettingsRowItem("恢复默认", null, onClick = onReset) }
+    }
+}
+
 /** tvOS Inset Grouped card item with focus zoom, pure white background on focus, and robust remote D-pad click */
 @Composable
 internal fun SettingsRowItem(
@@ -557,6 +737,10 @@ internal fun SettingsRowItem(
     onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
+    val bringIntoView = remember { BringIntoViewRequester() }
+    val scope = rememberCoroutineScope()
+    var itemSize by remember { mutableStateOf(IntSize.Zero) }
+    val density = LocalDensity.current
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     val raised = focused || hovered
@@ -568,6 +752,8 @@ internal fun SettingsRowItem(
         Modifier
             .fillMaxWidth()
             .height(76.dp)
+            .bringIntoViewRequester(bringIntoView)
+            .onSizeChanged { itemSize = it }
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
@@ -576,7 +762,19 @@ internal fun SettingsRowItem(
             .focusProperties {
                 if (leftReturnRequester != null) left = leftReturnRequester
             }
-            .onFocusChanged { focused = it.isFocused }
+            .onFocusChanged {
+                focused = it.isFocused
+                if (it.isFocused) {
+                    scope.launch {
+                        delay(50)
+                        with(density) {
+                            bringIntoView.bringIntoView(
+                                Rect(0f, -12.dp.toPx(), itemSize.width.toFloat(), itemSize.height + 12.dp.toPx())
+                            )
+                        }
+                    }
+                }
+            }
             .onPreviewKeyEvent {
                 if (it.key == Key.DirectionCenter || it.key == Key.Enter || it.key == Key.NumPadEnter) {
                     if (it.type == KeyEventType.KeyDown) {
@@ -724,6 +922,43 @@ internal fun SettingsRadioRow(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun PlaybackEngineSettings(
+    onBack: () -> Unit,
+    onChanged: () -> Unit,
+    returnRequester: FocusRequester? = null
+) {
+    val context = LocalContext.current
+    var selected by remember { mutableStateOf(DesktopPreferences.PlaybackEngine.current(context)) }
+    val backRequester = remember { FocusRequester() }
+
+    LaunchedEffect(Unit) { backRequester.requestFocus() }
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 8.dp, bottom = 48.dp)
+    ) {
+        SettingsRowItem("← 返回分类", null, backRequester, returnRequester, onBack)
+        Spacer(Modifier.height(24.dp))
+        Text("默认播放器", color = White, fontSize = 34.sp, fontWeight = FontWeight.Bold)
+        Text(
+            "选择媒体库点击播放时使用的内核；自动模式会在解码失败时切换到 mpv",
+            color = Color(0xFFA5ACB8), fontSize = 18.sp, modifier = Modifier.padding(top = 6.dp, bottom = 24.dp)
+        )
+        SettingsSectionTitle("播放策略")
+        DesktopPreferences.PlaybackEngine.entries.forEach { engine ->
+            SettingsRadioRow(
+                label = "${engine.label}  ·  ${engine.desc}",
+                selected = selected == engine,
+                leftReturnRequester = returnRequester
+            ) {
+                DesktopPreferences.PlaybackEngine.save(context, engine)
+                selected = engine
+                onChanged()
+            }
+            Spacer(Modifier.height(8.dp))
         }
     }
 }

@@ -21,6 +21,21 @@ fun MediaItemInfo.toDemoMedia(): DemoMedia = DemoMedia(
     realItem = this
 )
 
+fun MediaCategoryInfo.toDemoMedia(): DemoMedia = DemoMedia(
+    title = title,
+    detail = countText,
+    realItem = MediaItemInfo(
+        id = id,
+        accountId = accountId,
+        serverType = ServerType.EMBY,
+        title = title,
+        detail = countText,
+        posterUrl = thumbUrl,
+        collectionType = collectionType,
+        primaryImageAspectRatio = primaryImageAspectRatio
+    )
+)
+
 object DemoLibrary {
     fun bannerIntro(media: DemoMedia): String = when (media.title) {
         "海岸线之外" -> "有些相遇，从海的那一边开始。"
@@ -102,6 +117,7 @@ class DemoArtwork(context: Context) {
     )
     private val cache = java.util.concurrent.ConcurrentHashMap<DemoMedia, ImageBitmap>()
     private val castCache = java.util.concurrent.ConcurrentHashMap<Int, ImageBitmap>()
+    private val blurCache = java.util.concurrent.ConcurrentHashMap<String, ImageBitmap>()
     fun castImage(resource: Int): ImageBitmap = castCache.getOrPut(resource) {
         BitmapFactory.decodeResource(resources, resource, BitmapFactory.Options().apply { inSampleSize = 2 }).asImageBitmap()
     }
@@ -112,7 +128,14 @@ class DemoArtwork(context: Context) {
 
     /** Android 9-12: three separable box passes on a 1/8-size immutable wallpaper. */
     fun blurredWallpaper(media: DemoMedia? = null): ImageBitmap {
+        val cacheKey = media?.title ?: "__background__"
+        blurCache[cacheKey]?.let { return it }
         val source = if (media == null || media.title == "海岸线之外") background else image(media).asAndroidBitmap()
+        return blurredBitmap(source, cacheKey)
+    }
+
+    fun blurredBitmap(source: Bitmap, cacheKey: String): ImageBitmap {
+        blurCache[cacheKey]?.let { return it }
         val small = Bitmap.createScaledBitmap(source, 209, 118, true)
         val pixels = IntArray(small.width * small.height)
         small.getPixels(pixels, 0, small.width, 0, 0, small.width, small.height)
@@ -123,7 +146,7 @@ class DemoArtwork(context: Context) {
         }
         val result = Bitmap.createBitmap(pixels, small.width, small.height, Bitmap.Config.ARGB_8888)
         small.recycle()
-        return result.asImageBitmap()
+        return result.asImageBitmap().also { blurCache[cacheKey] = it }
     }
     private fun pass(src: IntArray, dst: IntArray, width: Int, height: Int, horizontal: Boolean) {
         for (y in 0 until height) for (x in 0 until width) {
@@ -138,4 +161,3 @@ class DemoArtwork(context: Context) {
         }
     }
 }
-

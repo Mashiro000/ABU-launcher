@@ -94,8 +94,9 @@ class WebDavAlistProvider(override val account: MediaAccount) : MediaSourceProvi
     }
 
     override suspend fun getResumeWatching(): List<MediaItemInfo> {
-        // WebDAV/Alist 无中心化观看记录，展示最新视频作为常用项
-        return getLatest().take(6)
+        // WebDAV/Alist has no server-side playback history. Never present recently added
+        // files as if they had actually been watched.
+        return emptyList()
     }
 
     override suspend fun getLatest(): List<MediaItemInfo> = withContext(Dispatchers.IO) {
@@ -111,6 +112,8 @@ class WebDavAlistProvider(override val account: MediaAccount) : MediaSourceProvi
         }
         result
     }
+
+    override suspend fun getFavorites(): List<MediaItemInfo> = emptyList()
 
     override suspend fun getCategories(): List<MediaCategoryInfo> = withContext(Dispatchers.IO) {
         val rootFiles = listPath("/")

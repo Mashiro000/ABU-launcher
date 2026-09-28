@@ -8,6 +8,8 @@ import android.net.NetworkCapabilities
 import android.view.View
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -63,6 +65,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
 import dev.chrisbanes.haze.*
+import com.limi.tvdesktop.player.TvPlaybackInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -77,9 +80,11 @@ class MainActivity : ComponentActivity() {
     @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        RenderPerformance.init(this)
         AccountManager.init(this)
         PosterCacheManager.init(this)
-        MediaLibraryManager.refresh()
+        MediaLibraryManager.init(this)
+        if (AccountManager.syncOnLaunch.value) MediaLibraryManager.refresh()
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).apply {
             hide(WindowInsetsCompat.Type.systemBars())
@@ -92,7 +97,20 @@ class MainActivity : ComponentActivity() {
         setContent { MaterialTheme(colorScheme = darkColorScheme()) { AppEntranceHost { TvDesktop() } } }
     }
 
+    override fun onStart() {
+        super.onStart()
+        DeveloperDiagnostics.attach(this)
+    }
+
+    override fun onStop() {
+        DeveloperDiagnostics.detach()
+        super.onStop()
+    }
+
+    // Activity key dispatch is required for TV remotes even when Compose has no focused node.
+    @android.annotation.SuppressLint("RestrictedApi")
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        DeveloperDiagnostics.recordKey(event)
         if (ScreenSaverState.isActive) {
             if (event.action == android.view.KeyEvent.ACTION_UP) {
                 ScreenSaverState.dismiss()
@@ -100,7 +118,20 @@ class MainActivity : ComponentActivity() {
             return true
         }
         ScreenSaverState.notifyInteraction()
-        return super.dispatchKeyEvent(event)
+        // 常见蓝牙/USB 手柄不会把 A/B 映射为电视确认/返回。统一归一化后，
+        // Compose 的焦点系统、播放器桥接和系统返回逻辑都能复用同一套行为。
+        fun remapKey(keyCode: Int) = android.view.KeyEvent(
+            event.downTime, event.eventTime, event.action, keyCode, event.repeatCount,
+            event.metaState, event.deviceId, event.scanCode, event.flags, event.source
+        )
+        val normalizedEvent = when (event.keyCode) {
+            android.view.KeyEvent.KEYCODE_BUTTON_A -> remapKey(android.view.KeyEvent.KEYCODE_DPAD_CENTER)
+            android.view.KeyEvent.KEYCODE_BUTTON_B -> remapKey(android.view.KeyEvent.KEYCODE_BACK)
+            else -> event
+        }
+        // 播放器打开时优先把按键交给播放器（保证收起控件后任意键都能唤回）
+        PlayerKeyBridge.onKey?.let { handler -> if (handler(normalizedEvent)) return true }
+        return super.dispatchKeyEvent(normalizedEvent)
     }
 
     override fun onUserInteraction() {
@@ -144,13 +175,65 @@ fun TvDesktop() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("desktop", Context.MODE_PRIVATE) }
     var animeko by remember { mutableStateOf(prefs.getBoolean("animeko", false)) }
-    var page by rememberSaveable { mutableStateOf("首页") }
+    // 旧版本可能存过已移除的“应用”页，兜底回媒体库，避免停在无标签的空白页。
+    var page by rememberSaveable { mutableStateOf(DesktopPreferences.LastTab.get(context).let { if (it == "应用") "媒体库" else it }) }
     var settings by rememberSaveable { mutableStateOf(false) }
     var settingsPage by rememberSaveable { mutableStateOf(false) }
     var wallpaperVersion by remember { mutableIntStateOf(0) }
     var selected by remember { mutableStateOf<DemoMedia?>(null) }
+    var posterWallCategory by remember { mutableStateOf<MediaCategoryInfo?>(null) }
     var playingMedia by remember { mutableStateOf<MediaItemInfo?>(null) }
+    var playingInfo by remember { mutableStateOf<TvPlaybackInfo?>(null) }
+    var mpvLaunchedMediaId by remember { mutableStateOf<String?>(null) }
+    val mpvLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val returnedPosition = result.data?.getIntExtra("position", -1)?.toLong() ?: -1L
+        val returnedDuration = result.data?.getIntExtra("duration", -1)?.toLong() ?: -1L
+        if (returnedPosition >= 0L) {
+            playingMedia?.let { MediaLibraryManager.reportPlayback(it, returnedPosition, returnedDuration, false) }
+            playingInfo = playingInfo?.copy(
+                startPositionMs = returnedPosition,
+                totalDurationMs = returnedDuration.takeIf { it > 0L } ?: playingInfo?.totalDurationMs ?: 0L
+            )
+        }
+        playingMedia = null
+        playingInfo = null
+        mpvLaunchedMediaId = null
+    }
     var bannerIndex by rememberSaveable { mutableIntStateOf(0) }
+
+    // Build the real player package (stream URL, episode playlist, codecs) before opening the
+    // player, so ExoPlayer is created with the correct media item instead of demo data.
+    LaunchedEffect(playingMedia) {
+        val m = playingMedia
+        playingInfo = null
+        if (m != null) {
+            playingInfo = withContext(Dispatchers.IO) {
+                runCatching { MediaLibraryManager.buildPlaybackInfo(m, m.title, m.playbackPositionMs) }.getOrNull()
+            }
+        } else {
+            mpvLaunchedMediaId = null
+        }
+    }
+
+    val activity = context as? android.app.Activity
+    LaunchedEffect(Unit) {
+        if (activity?.intent?.getBooleanExtra("open_player", false) == true) {
+            val stream = activity.intent.getStringExtra("stream_url") ?: com.limi.tvdesktop.player.TvPlaybackInfo.DEFAULT_TEST_VIDEO
+            val mediaTitle = activity.intent.getStringExtra("media_title") ?: "海岸线之外"
+            playingMedia = MediaItemInfo(
+                id = "demo_coastline",
+                accountId = "",
+                serverType = ServerType.EMBY,
+                title = mediaTitle,
+                streamUrl = stream,
+                mediaType = "Episode",
+                seasonNumber = 1,
+                episodeNumber = 3,
+                year = "2024",
+                genre = "科幻"
+            )
+        }
+    }
 
     val screensaverTimeout = remember(DesktopPreferences.version) {
         DesktopPreferences.ScreenSaverTimeout.current(context)
@@ -172,20 +255,18 @@ fun TvDesktop() {
 
     val realResumeWatching = MediaLibraryManager.resumeWatching
     val realLatestItems = MediaLibraryManager.latestItems
+    val realFavorites = MediaLibraryManager.favorites
+    val realCategories = MediaLibraryManager.categories
     val hasAccounts = MediaLibraryManager.hasRealAccounts
-    val showDemo = AccountManager.showDemoWhenEmpty.value
+    val showDemo = AccountManager.showDemoWhenEmpty.value && !hasAccounts
+    val isRecommendationMode = hasAccounts && realResumeWatching.isEmpty()
 
     val watchingList = remember(hasAccounts, realResumeWatching.size, realLatestItems.size, showDemo) {
-        if (hasAccounts) {
-            if (realResumeWatching.isNotEmpty()) {
-                realResumeWatching.map { it.toDemoMedia() }
-            } else if (realLatestItems.isNotEmpty()) {
-                realLatestItems.take(6).map { it.toDemoMedia() }
-            } else if (showDemo) {
-                DemoLibrary.watching
-            } else {
-                emptyList()
-            }
+        if (realResumeWatching.isNotEmpty()) {
+            realResumeWatching.map { it.toDemoMedia() }
+        } else if (hasAccounts && realLatestItems.isNotEmpty()) {
+            // This is intentionally presented as recommendations, never as watch history.
+            realLatestItems.take(6).map { it.toDemoMedia() }
         } else if (showDemo) {
             DemoLibrary.watching
         } else {
@@ -193,7 +274,7 @@ fun TvDesktop() {
         }
     }
     val recentList = remember(hasAccounts, realLatestItems.size, showDemo) {
-        if (hasAccounts && realLatestItems.isNotEmpty()) {
+        if (realLatestItems.isNotEmpty()) {
             realLatestItems.map { it.toDemoMedia() }
         } else if (showDemo) {
             DemoLibrary.recent
@@ -201,11 +282,44 @@ fun TvDesktop() {
             emptyList()
         }
     }
+    val categoryList = remember(hasAccounts, realCategories.size, showDemo) {
+        if (realCategories.isNotEmpty()) {
+            realCategories.map { it.toDemoMedia() }
+        } else if (showDemo) {
+            DemoLibrary.categories
+        } else {
+            emptyList()
+        }
+    }
+    var localFavVersion by remember { mutableIntStateOf(0) }
+    val favoriteList = remember(hasAccounts, realFavorites.size, realResumeWatching.size, realLatestItems.size, showDemo, localFavVersion) {
+        val prefs = context.getSharedPreferences("favorites", 0)
+        val pool = (realFavorites + realResumeWatching + realLatestItems).map { it.toDemoMedia() } +
+            if (showDemo) (DemoLibrary.favorites + DemoLibrary.watching + DemoLibrary.recent) else emptyList()
+        val localFavs = pool.filter { prefs.getBoolean(it.title, false) }
+        val combined = (realFavorites.map { it.toDemoMedia() } + localFavs).distinctBy { it.title }
+        if (combined.isNotEmpty()) {
+            combined
+        } else if (showDemo && !hasAccounts) {
+            DemoLibrary.favorites
+        } else {
+            emptyList()
+        }
+    }
     val safeBannerIndex = bannerIndex.coerceIn(0, (watchingList.size - 1).coerceAtLeast(0))
     val banner = watchingList.getOrNull(safeBannerIndex) ?: DemoLibrary.watching.first()
+    // Warm the media-library wallpaper before the user switches tabs, so the follow-content
+    // backdrop is already decoded instead of flashing the demo fallback for a frame.
+    LaunchedEffect(banner.realItem?.backdropUrl) {
+        val url = banner.realItem?.backdropUrl
+        if (!url.isNullOrBlank()) withContext(Dispatchers.Default) { PosterCacheManager.loadPoster(url) }
+    }
 
     var detailClose by remember { mutableStateOf<(() -> Unit)?>(null) }
     LaunchedEffect(selected) {
+        if (selected == null) {
+            localFavVersion++
+        }
         if (selected?.let { isDetailMedia(it) } != true) DetailOrigin.retainedFocus = null
     }
     var search by rememberSaveable { mutableStateOf(false) }
@@ -217,19 +331,45 @@ fun TvDesktop() {
         }
     }
     val haze = remember { HazeState() }
-    val controlHaze = remember { HazeState() }
     val wallpaperHaze = remember { HazeState() }
+    val glassPrefVersion = DesktopPreferences.version
+    val appListBlur = remember(glassPrefVersion) { DesktopPreferences.GlassTuning.appListBlur(context) }
+    val appListOpacity = remember(glassPrefVersion) { DesktopPreferences.GlassTuning.appListOpacity(context) }
+    val wallpaperMode = remember(wallpaperVersion) { WallpaperMode.current(context) }
+    val fixedWallpaper = remember(wallpaperVersion, wallpaperMode) {
+        when (wallpaperMode) {
+            WallpaperMode.BING -> BingWallpaper.currentBitmap(context)
+            WallpaperMode.LOCAL -> LocalWallpapers.bitmap(context)
+            else -> null
+        }
+    }
     var legacyBlur by remember { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(artwork, banner) {
-        if (Build.VERSION.SDK_INT < 33) legacyBlur = withContext(Dispatchers.Default) { artwork.blurredWallpaper(banner) }
+    LaunchedEffect(artwork, banner, page, wallpaperMode, fixedWallpaper, RenderPerformance.staticBlur) {
+        legacyBlur = if (RenderPerformance.staticBlur) withContext(Dispatchers.Default) {
+            when {
+                page == "媒体库" -> {
+                    val backdropUrl = banner.realItem?.backdropUrl.orEmpty()
+                    val remote = if (backdropUrl.isNotBlank()) PosterCacheManager.loadPoster(backdropUrl) else null
+                    if (remote != null) artwork.blurredBitmap(remote.asAndroidBitmap(), "media:$backdropUrl")
+                    else if (banner.realItem != null) artwork.blurredBitmap(
+                        android.graphics.Bitmap.createBitmap(16, 9, android.graphics.Bitmap.Config.ARGB_8888).apply { eraseColor(0xFF141414.toInt()) },
+                        "media:neutral"
+                    ) else artwork.blurredWallpaper(banner)
+                }
+                fixedWallpaper != null -> artwork.blurredBitmap(fixedWallpaper.asAndroidBitmap(), "wallpaper:${wallpaperMode.name}:$wallpaperVersion")
+                else -> artwork.blurredWallpaper(null)
+            }
+        } else null
     }
     var homeExpandProgress by remember { mutableFloatStateOf(0f) }
     var homeReturnToTop by remember { mutableStateOf<(() -> Unit)?>(null) }
     val list = rememberLazyListState()
     val watching = rememberLazyListState()
+    val categories = rememberLazyListState()
     val scrolled by remember { derivedStateOf { list.firstVisibleItemIndex > 0 || list.firstVisibleItemScrollOffset > 0 } }
     val scope = rememberCoroutineScope()
     val watchingFocus = remember(watchingList.size) { List(watchingList.size.coerceAtLeast(1)) { FocusRequester() } }
+    val categoryFocus = remember(categoryList.size) { List(categoryList.size.coerceAtLeast(1)) { FocusRequester() } }
     val first = watchingFocus.first()
     val playback = remember { FocusRequester() }
     val category = remember { FocusRequester() }
@@ -274,6 +414,7 @@ fun TvDesktop() {
             settings -> settings = false
             selected?.let { isDetailMedia(it) } == true -> detailClose?.invoke()
             selected != null -> selected = null
+            posterWallCategory != null -> posterWallCategory = null
             search -> search = false
             page == "首页" && homeExpandProgress > 0.05f -> homeReturnToTop?.invoke()
             page != "媒体库" -> page = "媒体库"
@@ -282,6 +423,7 @@ fun TvDesktop() {
         }
     }
     LaunchedEffect(page) {
+        DesktopPreferences.LastTab.set(context, page)
         if (page == "媒体库") {
             list.scrollToItem(0)
         } else if (page == "首页") {
@@ -290,7 +432,7 @@ fun TvDesktop() {
     }
     LaunchedEffect(Unit) {
         if (page == "首页" && !settings && !search) homeDock.requestFocus()
-        else if (page == "媒体库" && !settings && !search && selected == null) first.requestFocus()
+        else if (page == "媒体库" && !settings && !search && selected == null && posterWallCategory == null) first.requestFocus()
     }
     BackHandler {
         closeOrReturn()
@@ -303,7 +445,55 @@ fun TvDesktop() {
         val scale = with(physical) { maxWidth.toPx() } / 1672f
         val canvasHeight = (with(physical) { maxHeight.toPx() } / scale).dp
         CompositionLocalProvider(LocalDensity provides Density(scale, 1f), LocalCanvasHeight provides canvasHeight, LocalKeyboardControl provides keyboardControl) {
-            FocusRowsHost(list, LibraryFocusRows, page == "媒体库" && selected == null && !settings && !search, onDirection = { keyboardControl = true }) {
+            // 我的媒体 现在是单行横向货架：行高取最高卡片，行中心 = 96 顶距 + 标题 36 + titleGap 38 + 货架上下 24 + 半高
+            val categoryRowHeight = remember(categoryList, artwork) {
+                categoryList.map { categoryCardSize(categoryCardRatio(it, artwork)).second.value }.maxOrNull() ?: 198f
+            }
+            val categoryRowCenterDp = 194f + categoryRowHeight / 2f
+            val dynamicFocusRows = remember(categoryRowCenterDp, favoriteList.size, recentList.size, hasAccounts, showDemo) {
+                val rows = mutableListOf<FocusRowSpec>()
+                rows.add(FocusRowSpec("header", 0, false))
+                rows.add(FocusRowSpec("play", 0, false))
+                rows.add(FocusRowSpec("watching", 0, false))
+
+                var lazyIdx = 1
+
+                if (categoryList.isNotEmpty()) {
+                    rows.add(FocusRowSpec("categories", lazyIdx, centerOffsetDp = categoryRowCenterDp))
+                    lazyIdx++
+                }
+
+                // 我的收藏模块始终渲染；只有真正存在可聚焦内容时才登记它的焦点行。
+                val favIdx = lazyIdx
+                if (favoriteList.isNotEmpty()) {
+                    rows.add(FocusRowSpec("我的收藏:actions", favIdx))
+                    rows.add(FocusRowSpec("favoriteFilters", favIdx))
+                    rows.add(FocusRowSpec("favorites", favIdx))
+                }
+                lazyIdx++
+
+                if (recentList.isNotEmpty()) {
+                    val recIdx = lazyIdx
+                    rows.add(FocusRowSpec("最近添加:actions", recIdx))
+                    rows.add(FocusRowSpec("最近添加:cards", recIdx))
+                    lazyIdx++
+                }
+
+                if (!hasAccounts && showDemo) {
+                    val musicIdx = lazyIdx
+                    rows.add(FocusRowSpec("最近听过:actions", musicIdx))
+                    rows.add(FocusRowSpec("最近听过:cards", musicIdx))
+                    lazyIdx++
+
+                    val memIdx = lazyIdx
+                    rows.add(FocusRowSpec("最近的回忆:actions", memIdx))
+                    rows.add(FocusRowSpec("memories", memIdx))
+                    lazyIdx++
+                }
+
+                rows
+            }
+            FocusRowsHost(list, dynamicFocusRows, page == "媒体库" && selected == null && posterWallCategory == null && !settings && !search, onDirection = { keyboardControl = true }) {
             val progress = {
                 if (page != "媒体库") 0f
                 else if (list.firstVisibleItemIndex > 0) 1f
@@ -322,58 +512,52 @@ fun TvDesktop() {
                 if (it.key == Key.Escape || it.key == Key.Back) {
                     // When the control center is open, don't consume Back here: let its own
                     // BackHandler run the animated close, so Back matches tapping the 关闭 tile.
-                    val handledHere = !settings && !settingsPage
+                    // 播放器打开时不拦截返回：交给播放器自己的 BackHandler（关抽屉→收控件→退出）
+                    val handledHere = !settings && !settingsPage && playingMedia == null
                     if (it.type == KeyEventType.KeyDown && handledHere) closeOrReturn()
                     handledHere
                 } else false
             }) {
-                Box(Modifier.fillMaxSize().then(if (Build.VERSION.SDK_INT >= 31) Modifier.hazeSource(controlHaze) else Modifier)) {
-                Box(Modifier.fillMaxSize().then(if (Build.VERSION.SDK_INT >= 31) Modifier.hazeSource(haze) else Modifier)) {
-                    val wallpaperMode = remember(wallpaperVersion) { WallpaperMode.current(context) }
-                    val fixedWallpaper = remember(wallpaperVersion, wallpaperMode) {
-                        when (wallpaperMode) {
-                            WallpaperMode.BING -> BingWallpaper.currentBitmap(context)
-                            WallpaperMode.LOCAL -> LocalWallpapers.bitmap(context)
-                            else -> null
-                        }
-                    }
+                Box(Modifier.fillMaxSize().then(if (RenderPerformance.blur31) Modifier.hazeSource(haze) else Modifier)) {
                     val videoUri = remember(wallpaperVersion, wallpaperMode) {
                         if (wallpaperMode == WallpaperMode.VIDEO) VideoWallpaperPrefs.current(context) else null
                     }
-                    val currentBlurProgress = if (page == "媒体库") progress() else if (page == "首页") homeExpandProgress else 0f
+                    val currentBlurProgress = { if (page == "媒体库") progress() else if (page == "首页") homeExpandProgress else 0f }
 
                     if (page == "媒体库") {
                         FollowContentWallpaper(banner, artwork, wallpaperHaze)
                     } else {
                         when {
-                            wallpaperMode == WallpaperMode.VIDEO && videoUri != null ->
+                            wallpaperMode == WallpaperMode.VIDEO && videoUri != null && !RenderPerformance.lowPerformance ->
                                 VideoWallpaperSurface(videoUri, Modifier.fillMaxSize())
                             wallpaperMode != WallpaperMode.FOLLOW_CONTENT && fixedWallpaper != null ->
                                 Image(fixedWallpaper, null, Modifier.fillMaxSize()
-                                    .then(if (Build.VERSION.SDK_INT >= 31) Modifier.hazeSource(wallpaperHaze) else Modifier),
+                                    .then(if (RenderPerformance.blur31) Modifier.hazeSource(wallpaperHaze) else Modifier),
                                     contentScale = ContentScale.Crop)
                             wallpaperMode == WallpaperMode.FOLLOW_CONTENT ->
                                 FollowContentWallpaper(banner, artwork, wallpaperHaze)
                             else ->
                                 Image(artwork.background.asImageBitmap(), null, Modifier.fillMaxSize()
-                                    .then(if (Build.VERSION.SDK_INT >= 31) Modifier.hazeSource(wallpaperHaze) else Modifier),
+                                    .then(if (RenderPerformance.blur31) Modifier.hazeSource(wallpaperHaze) else Modifier),
                                     contentScale = ContentScale.Crop)
                         }
                     }
-                    if (Build.VERSION.SDK_INT >= 31) {
+                    if (RenderPerformance.blur31) {
                         Box(Modifier.fillMaxSize().hazeEffect(wallpaperHaze) {
-                            blurEnabled = currentBlurProgress > 0f
-                            blurRadius = (50f * currentBlurProgress).coerceAtLeast(.01f).dp
+                            blurEnabled = currentBlurProgress() > 0f
+                            blurRadius = ((if (page == "首页") appListBlur else 50f) * currentBlurProgress()).coerceAtLeast(.01f).dp
                             backgroundColor = Color.Transparent
-                            tints = if (page == "首页") listOf(HazeTint(Color.Black.copy(alpha = .35f * currentBlurProgress))) else emptyList()
+                            tints = emptyList()
                             noiseFactor = 0f
                             inputScale = HazeInputScale.Fixed(.5f)
                         })
-                    } else if (legacyBlur != null) {
-                        Image(legacyBlur!!, null, Modifier.fillMaxSize().graphicsLayer { alpha = currentBlurProgress }, contentScale = ContentScale.Crop)
+                    } else if (RenderPerformance.staticBlur && legacyBlur != null) {
+                        Image(legacyBlur!!, null, Modifier.fillMaxSize().graphicsLayer {
+                            alpha = currentBlurProgress() * (if (page == "首页") (appListBlur / 50f).coerceIn(0f, 1f) else 1f)
+                        }, contentScale = ContentScale.Crop)
                     }
                     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0x08202020), Color(0x0A101010), Color(0xA6101010)))))
-                    Canvas(Modifier.fillMaxSize()) { drawRect(Color.Black.copy(alpha = .72f * currentBlurProgress)) }
+                    Canvas(Modifier.fillMaxSize()) { drawRect(Color.Black.copy(alpha = (if (page == "首页") appListOpacity else .72f) * currentBlurProgress())) }
                     if (page == "媒体库") {
                         LazyColumn(state = list, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(0.dp)) {
                             item(key = "first-screen") {
@@ -401,16 +585,48 @@ fun TvDesktop() {
                                                 Text("当前媒体源: ${curAcc.name} (${curAcc.type.displayName}) ⇄", color = Color(0xFF93C5FD), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                                             }
                                         }
-                                        Crossfade(banner, Modifier.staggeredEntrance(0).height(120.dp), tween(280), label = "banner-title") { media ->
-                                            Text(media.title, color = White, fontSize = 90.sp, lineHeight = 120.sp, fontFamily = FontFamily(Font(R.font.ma_shan_zheng)), letterSpacing = 3.sp)
+                                        Crossfade(banner, Modifier.staggeredEntrance(0).height(120.dp), tween(if (RenderPerformance.reducedEffects) 90 else 220), label = "banner-title") { media ->
+                                            val logoUrl = media.realItem?.logoUrl.orEmpty()
+                                            val logoBitmap = if (logoUrl.isNotBlank()) rememberPosterImage(logoUrl) else null
+                                            if (logoBitmap != null) {
+                                                Image(
+                                                    bitmap = logoBitmap,
+                                                    contentDescription = media.title,
+                                                    modifier = Modifier.height(110.dp).wrapContentWidth(Alignment.Start),
+                                                    contentScale = ContentScale.Fit,
+                                                    alignment = Alignment.CenterStart
+                                                )
+                                            } else {
+                                                val isDemoCalligraphy = media.title == "海岸线之外"
+                                                Text(
+                                                    text = media.title,
+                                                    color = White,
+                                                    fontSize = if (isDemoCalligraphy) 90.sp else 64.sp,
+                                                    lineHeight = if (isDemoCalligraphy) 120.sp else 80.sp,
+                                                    fontFamily = if (isDemoCalligraphy) FontFamily(Font(R.font.ma_shan_zheng)) else FontFamily.Default,
+                                                    fontWeight = if (isDemoCalligraphy) FontWeight.Normal else FontWeight.Bold,
+                                                    letterSpacing = if (isDemoCalligraphy) 3.sp else 1.sp,
+                                                    maxLines = 2,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
                                         }
                                         Spacer(Modifier.height(29.dp))
-                                        Crossfade(banner, Modifier.staggeredEntrance(1).height(32.dp), tween(280), label = "banner-intro") { media ->
-                                            Text(DemoLibrary.bannerIntro(media), color = Muted, fontSize = 23.sp, letterSpacing = 2.sp)
+                                        Crossfade(banner, Modifier.staggeredEntrance(1).height(36.dp), tween(if (RenderPerformance.reducedEffects) 90 else 220), label = "banner-intro") { media ->
+                                            val introText = when {
+                                                media.realItem?.tagline?.isNotBlank() == true -> media.realItem.tagline
+                                                media.realItem?.overview?.isNotBlank() == true -> {
+                                                    val ov = media.realItem.overview.trim()
+                                                    val first = ov.split('。', '！', '!', '.', '\n').firstOrNull { it.isNotBlank() }?.trim() ?: ov
+                                                    if (first.length > 35) first.take(35) + "..." else first
+                                                }
+                                                else -> DemoLibrary.bannerIntro(media)
+                                            }
+                                            Text(introText, color = Muted, fontSize = 23.sp, letterSpacing = 2.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         }
                                         Spacer(Modifier.height(36.dp))
                                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(28.dp)) {
-                                            PlaybackButton("▶  继续播放", Modifier.staggeredEntrance(2).size(236.dp, 70.dp).rowFocusTarget(row = "play").focusRequester(playback)
+                                            PlaybackButton(if (isRecommendationMode) "▶  播放" else "▶  继续播放", Modifier.staggeredEntrance(2).size(236.dp, 70.dp).rowFocusTarget(row = "play").focusRequester(playback)
                                                 .focusProperties { up = nav; down = first }.onPreviewKeyEvent { event ->
                                                     if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
                                                         returnToTop(first); true
@@ -418,21 +634,27 @@ fun TvDesktop() {
                                                         nav.requestFocus(); true
                                                     } else false
                                                 }, wallpaperHaze, legacyBlur) {
-                                                    if (banner.realItem?.streamUrl?.isNotBlank() == true) {
-                                                        playingMedia = banner.realItem
+                                                    val target = banner.realItem
+                                                    if (target != null) {
+                                                        scope.launch {
+                                                            val playable = withContext(Dispatchers.IO) { MediaLibraryManager.playableItem(target) }
+                                                            playingMedia = playable
+                                                        }
                                                     } else {
                                                         selected = banner
                                                     }
                                                 }
-                                            Column(Modifier.staggeredEntrance(3).width(286.dp)) {
-                                                Progress(banner.progress, Modifier.fillMaxWidth().height(8.dp))
-                                                Spacer(Modifier.height(12.dp))
-                                                Text(if (banner.detail.contains("集")) "${banner.detail.substringBefore("/").trim()} · 已观看 ${(banner.progress * 45).toInt()} 分钟 / 45 分钟" else banner.detail, color = Muted, fontSize = 18.sp)
+                                            if (!isRecommendationMode) {
+                                                Column(Modifier.staggeredEntrance(3).width(340.dp)) {
+                                                    Progress(banner.progress, Modifier.fillMaxWidth().height(8.dp))
+                                                    Spacer(Modifier.height(12.dp))
+                                                    Text(formatMediaProgressText(banner), color = Muted, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                }
                                             }
                                         }
                                     }
                                     Column(Modifier.offset(y = 618.dp).fillMaxWidth()) {
-                                        Text("继续观看", Modifier.staggeredEntrance(4).padding(start = LibraryDesign.pageInset), color = White, fontSize = LibraryDesign.heading, lineHeight = 36.sp, fontWeight = FontWeight.Medium)
+                                        Text(if (isRecommendationMode) "推荐" else "继续观看", Modifier.staggeredEntrance(4).padding(start = LibraryDesign.pageInset), color = White, fontSize = LibraryDesign.heading, lineHeight = 36.sp, fontWeight = FontWeight.Medium)
                                         Spacer(Modifier.height(14.dp))
                                         val watchingShelf = remember(watching, scope, scale) {
                                             ShelfScrollController(watching, scope, itemWidthPx = { 352f * scale }, gapPx = { LibraryDesign.cardGap.value * scale })
@@ -470,47 +692,94 @@ fun TvDesktop() {
                                                             true
                                                         } else false
                                                     }) {
-                                                        if (media.realItem?.streamUrl?.isNotBlank() == true) {
-                                                            playingMedia = media.realItem
-                                                        } else {
-                                                            selected = media
-                                                        }
+                                                        selected = media
                                                     }
                                             }
                                         }
                                     }
                                 }
                             }
-                            item(key = "categories") {
-                                SectionSurface {
-                                    SectionTitle("我的媒体", entranceIndex = 10)
-                                    Row(horizontalArrangement = Arrangement.spacedBy(LibraryDesign.cardGap)) {
-                                        DemoLibrary.categories.forEachIndexed { i, media ->
-                                            CategoryCard(media, artwork, Modifier.staggeredEntrance(11 + i).rowFocusTarget(row = "categories").width(LibraryDesign.posterWidth).height(366.dp)
-                                                .then(if (i == 0) Modifier.focusRequester(category) else Modifier)
-                                                .focusProperties { up = watchingFocus[bannerIndex] }
-                                                .onPreviewKeyEvent {
-                                                    if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionUp) { returnToTop(watchingFocus[bannerIndex]); true } else false
-                                                }) { selected = media }
+                            if (categoryList.isNotEmpty()) {
+                                item(key = "categories") {
+                                    Column(Modifier.fillMaxWidth().padding(top = 96.dp, bottom = 32.dp)) {
+                                        Box(Modifier.padding(horizontal = LibraryDesign.pageInset)) {
+                                            SectionTitle("我的媒体", entranceIndex = 10)
+                                        }
+                                        val categoryShelf = remember(categories, scope, scale) {
+                                            ShelfScrollController(categories, scope, itemWidthPx = { 352f * scale }, gapPx = { LibraryDesign.cardGap.value * scale })
+                                        }
+                                        LazyRow(
+                                            state = categories,
+                                            modifier = Modifier.pointerInput(categories) {
+                                                // 鼠标滚轮在这条货架上是横向滚动。
+                                                awaitPointerEventScope {
+                                                    while (true) {
+                                                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                                                        if (event.type == PointerEventType.Scroll) {
+                                                            val delta = event.changes.firstOrNull()?.scrollDelta ?: Offset.Zero
+                                                            val amount = if (delta.x != 0f) delta.x else delta.y
+                                                            if (amount != 0f) {
+                                                                scope.launch { categories.animateScrollBy(amount * 72.dp.toPx()) }
+                                                                event.changes.forEach { it.consume() }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            contentPadding = PaddingValues(horizontal = LibraryDesign.pageInset, vertical = 24.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(LibraryDesign.cardGap)
+                                        ) {
+                                            itemsIndexed(categoryList, key = { i, media -> "${media.title}_$i" }) { i, media ->
+                                                CategoryCard(
+                                                    media = media,
+                                                    artwork = artwork,
+                                                    modifier = Modifier
+                                                        .staggeredEntrance(11 + i)
+                                                        .rowFocusTarget(row = "categories")
+                                                        .focusRequester(categoryFocus.getOrElse(i) { categoryFocus.first() })
+                                                        .onPreviewKeyEvent { event ->
+                                                            if (event.type == KeyEventType.KeyDown && (event.key == Key.DirectionRight || event.key == Key.DirectionLeft)) {
+                                                                val target = (i + if (event.key == Key.DirectionRight) 1 else -1).coerceIn(0, (categoryList.size - 1).coerceAtLeast(0))
+                                                                if (target != i && target in categoryFocus.indices) categoryShelf.select(target) { categoryFocus[target].requestFocus() }
+                                                                true
+                                                            } else false
+                                                        }
+                                                ) {
+                                                    val catInfo = realCategories.find { it.id == media.realItem?.id }
+                                                        ?: MediaCategoryInfo(
+                                                            id = media.realItem?.id ?: media.title,
+                                                            title = media.title,
+                                                            countText = media.detail,
+                                                            thumbUrl = media.realItem?.posterUrl.orEmpty(),
+                                                            collectionType = media.realItem?.collectionType ?: "movies",
+                                                            accountId = media.realItem?.accountId.orEmpty()
+                                                        )
+                                                    posterWallCategory = catInfo
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
-                            item(key = "favorites") { Favorites(artwork) { selected = it } }
-                            item(key = "recent") { PosterSection("最近添加", DemoLibrary.recent, artwork, entranceIndex = 25) { selected = it } }
-                            item(key = "music") { PosterSection("最近听过", DemoLibrary.music, artwork, square = true, entranceIndex = 32) { selected = it } }
-                            item(key = "memories") {
-                                SectionSurface {
-                                    SectionTitle("最近的回忆", entranceIndex = 39, onAll = { selected = DemoLibrary.memories[0] })
-                                    Row(horizontalArrangement = Arrangement.spacedBy(LibraryDesign.cardGap)) {
-                                        DemoLibrary.memories.forEachIndexed { i, media -> PosterCard(media, artwork, (1672.dp - LibraryDesign.pageInset * 2 - LibraryDesign.cardGap * 3) / 4, 211.dp, focusRow = "memories", entranceIndex = 40 + i) { selected = media } }
+                            item(key = "favorites") { Favorites(artwork, favoriteList) { selected = it } }
+                            if (recentList.isNotEmpty()) {
+                                item(key = "recent") { PosterSection("最近添加", recentList, artwork, entranceIndex = 25) { selected = it } }
+                            }
+                            if (!hasAccounts && showDemo) {
+                                item(key = "music") { PosterSection("最近听过", DemoLibrary.music, artwork, square = true, entranceIndex = 32) { selected = it } }
+                                item(key = "memories") {
+                                    SectionSurface {
+                                        SectionTitle("最近的回忆", entranceIndex = 39, onAll = { selected = DemoLibrary.memories[0] })
+                                        Row(horizontalArrangement = Arrangement.spacedBy(LibraryDesign.cardGap)) {
+                                            DemoLibrary.memories.forEachIndexed { i, media -> PosterCard(media, artwork, (1672.dp - LibraryDesign.pageInset * 2 - LibraryDesign.cardGap * 3) / 4, 211.dp, focusRow = "memories", entranceIndex = 40 + i) { selected = media } }
+                                        }
+                                        Spacer(Modifier.height(76.dp))
                                     }
-                                    Spacer(Modifier.height(76.dp))
                                 }
                             }
                         }
                     } else if (page == "首页") {
-                        HomePage(wallpaperHaze, artwork, homeDock, homeNav,
+                        HomePage(wallpaperHaze, artwork, legacyBlur, homeDock, homeNav,
                             onExpandProgress = { homeExpandProgress = it },
                             registerReturnToTop = { homeReturnToTop = it })
                     } else {
@@ -534,6 +803,14 @@ fun TvDesktop() {
                         else (list.firstVisibleItemScrollOffset / ((618f - 112f) * scale)).coerceIn(0f, 1f)
                     }, onPage = { selected = null; page = it; if (it == "首页") homeReturnToTop?.invoke() }, onSettings = { settings = true }, onSearch = { search = true },
                         onContent = { if (page == "媒体库") returnToTop(playback) else if (page == "首页") homeDock.requestFocus() })
+                }
+                if (posterWallCategory != null) {
+                    MediaPosterWallPage(
+                        category = posterWallCategory!!,
+                        artwork = artwork,
+                        onDismiss = { posterWallCategory = null },
+                        onSelectMedia = { selected = it }
+                    )
                 }
                 if (selected != null && !isDetailMedia(selected!!)) Overlay(selected!!.title, onClose = { selected = null }) {
                     Text(selected!!.detail, color = Muted, fontSize = 24.sp)
@@ -560,30 +837,60 @@ fun TvDesktop() {
                     }
                 }
                 }
-                if (settings) ControlCenter(controlHaze, onSettings = {
+                if (settings) ControlCenter(haze, legacyBlur, onSettings = {
                     settings = false
                     settingsPage = true
                 }, onClose = { settings = false })
-                if (settingsPage) SettingsPage(haze = controlHaze, onClose = { settingsPage = false }, onWallpaperChanged = { wallpaperVersion++ })
-                if (playingMedia != null) {
+                if (settingsPage) SettingsPage(haze = haze, staticBlur = legacyBlur, onClose = { settingsPage = false }, onWallpaperChanged = { wallpaperVersion++ })
+                val media = playingMedia
+                val info = playingInfo
+                if (media != null && info != null) {
                     VideoPlayerScreen(
-                        title = playingMedia!!.title,
-                        streamUrl = playingMedia!!.streamUrl,
-                        startPositionMs = playingMedia!!.playbackPositionMs,
-                        onProgressUpdate = { pos, _ ->
-                            MediaLibraryManager.reportPlayback(playingMedia!!, pos, false)
+                        title = info.title,
+                        streamUrl = info.streamUrl,
+                        startPositionMs = info.startPositionMs,
+                        playbackInfo = info,
+                        onProgressUpdate = { pos, duration ->
+                            MediaLibraryManager.reportPlayback(media, pos, duration, false)
                         },
-                        onOpenExternal = {
-                            launchExternalPlayer(context, playingMedia!!.streamUrl, playingMedia!!.title)
+                        onOpenExternal = { positionMs ->
+                            val mpvIntent = createMpvIntent(info, positionMs)
+                            if (mpvIntent.resolveActivity(context.packageManager) != null) {
+                                mpvLauncher.launch(mpvIntent)
+                            } else {
+                                android.widget.Toast.makeText(context, "尚未安装 mpv-android", android.widget.Toast.LENGTH_LONG).show()
+                                context.startActivity(
+                                    android.content.Intent(
+                                        android.content.Intent.ACTION_VIEW,
+                                        android.net.Uri.parse("https://github.com/mpv-android/mpv-android/releases/latest")
+                                    )
+                                )
+                            }
                         },
                         onClose = {
                             playingMedia = null
                         }
                     )
+                } else if (media != null) {
+                    Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = Color(0xFF3875B6))
+                }
+                SideEffect {
+                    DeveloperDiagnostics.scene = when {
+                        ScreenSaverState.isActive -> "屏保"
+                        playingMedia != null -> "播放器"
+                        settingsPage -> "设置"
+                        settings -> "控制中心"
+                        selected != null -> "详情页"
+                        posterWallCategory != null -> "海报墙"
+                        search -> "搜索"
+                        else -> page
+                    }
                 }
                 if (ScreenSaverState.isActive) {
                     ScreenSaverOverlay(onDismiss = { ScreenSaverState.dismiss() })
                 }
+                PerformanceOverlay()
             }
         }
     }
@@ -756,23 +1063,85 @@ private fun ScreenSaverOverlay(onDismiss: () -> Unit) {
 
 private fun Modifier.clipToBoundsCompat() = clip(ContinuousCornerShape(0.dp))
 
+internal fun formatMediaProgressText(media: DemoMedia): String {
+    val real = media.realItem
+    if (real != null) {
+        val totalMs = real.totalDurationMs
+        val posMs = real.playbackPositionMs
+        val isEpisode = real.mediaType == "Episode" || real.seasonNumber > 0 || real.episodeNumber > 0
+
+        fun formatDuration(ms: Long): String {
+            val totalSeconds = (ms / 1000).coerceAtLeast(0)
+            val minutes = totalSeconds / 60
+            val hours = minutes / 60
+            val remMinutes = minutes % 60
+            return if (hours > 0) {
+                if (remMinutes > 0) "$hours 小时 $remMinutes 分钟" else "$hours 小时"
+            } else {
+                "${minutes.coerceAtLeast(1)} 分钟"
+            }
+        }
+
+        val episodePart = if (isEpisode && real.episodeNumber > 0) {
+            "第 ${real.episodeNumber} 集 · "
+        } else if (real.detail.contains("集")) {
+            "${real.detail.substringBefore("/").trim()} · "
+        } else ""
+
+        return if (totalMs > 0 && posMs > 0) {
+            "$episodePart${formatDuration(posMs)} / ${formatDuration(totalMs)}"
+        } else if (totalMs > 0) {
+            val calcPosMs = (totalMs * real.progress).toLong()
+            "$episodePart${formatDuration(calcPosMs)} / ${formatDuration(totalMs)}"
+        } else if (real.progress > 0f) {
+            val estTotal = 45 * 60 * 1000L
+            val estPos = (estTotal * real.progress).toLong()
+            "$episodePart${formatDuration(estPos)} / ${formatDuration(estTotal)}"
+        } else {
+            episodePart.removeSuffix(" · ").ifBlank { real.detail }
+        }
+    } else {
+        val mins = (media.progress * 45).toInt().coerceAtLeast(1)
+        return if (media.detail.contains("集")) {
+            "${media.detail.substringBefore("/").trim()} · $mins 分钟 / 45 分钟"
+        } else {
+            "$mins 分钟 / 45 分钟"
+        }
+    }
+}
+
 @OptIn(ExperimentalHazeApi::class)
 @Composable
 private fun FollowContentWallpaper(banner: DemoMedia, artwork: DemoArtwork, wallpaperHaze: HazeState) {
     Crossfade(banner, Modifier.fillMaxSize()
-        .then(if (Build.VERSION.SDK_INT >= 33) Modifier.hazeSource(wallpaperHaze) else Modifier),
-        animationSpec = tween(380), label = "banner-background") { media ->
-        Image(if (media.title == "海岸线之外") artwork.background.asImageBitmap() else artwork.image(media),
-            null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        .then(if (RenderPerformance.blur33) Modifier.hazeSource(wallpaperHaze) else Modifier),
+        animationSpec = tween(if (RenderPerformance.reducedEffects) 100 else 260), label = "banner-background") { media ->
+        val realBackdrop = media.realItem?.backdropUrl
+        val remoteBmp = if (!realBackdrop.isNullOrBlank()) rememberPosterImage(realBackdrop) else null
+        if (remoteBmp != null) {
+            Image(remoteBmp, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        } else if (media.realItem != null) {
+            // Server backdrop not decoded yet: stay on a neutral frame rather than flashing an
+            // unrelated bundled demo image.
+            Box(Modifier.fillMaxSize().background(Color(0xFF141414)))
+        } else {
+            Image(if (media.title == "海岸线之外") artwork.background.asImageBitmap() else artwork.image(media),
+                null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        }
     }
 }
 
 @Composable
 private fun Header(page: String, animeko: Boolean, haze: HazeState, legacyBlur: ImageBitmap?, nav: FocusRequester, homeNav: FocusRequester, artwork: DemoArtwork, backdropReveal: () -> Float, onPage: (String) -> Unit, onSettings: () -> Unit, onSearch: () -> Unit, onContent: () -> Unit) {
+    val context = LocalContext.current
+    val tuningVersion = DesktopPreferences.version
+    val navBlur = remember(tuningVersion) { DesktopPreferences.GlassTuning.navBlur(context) }
+    val navOpacity = remember(tuningVersion) { DesktopPreferences.GlassTuning.navOpacity(context) }
     val canvasHeight = LocalCanvasHeight.current
     TopBarBackdrop(haze, backdropReveal)
-    val tabs = listOf("首页", "媒体库", "直播", "应用", "游戏") + if (animeko) listOf("Animeko") else emptyList()
-    val width = if (animeko) 744.dp else 620.dp
+    val tabs = listOf("首页", "媒体库", "直播", "游戏") + if (animeko) listOf("Animeko") else emptyList()
+    // 每个标签槽位保持 124dp 设计宽度，标签数变化时导航条整体等比伸缩。
+    val width = 124.dp * tabs.size
     var hoveredTab by remember { mutableStateOf<String?>(null) }
     var keyboardNavigation by remember { mutableStateOf(false) }
     val capsuleWidth = (width - 10.dp) / tabs.size - 18.dp
@@ -781,19 +1150,18 @@ private fun Header(page: String, animeko: Boolean, haze: HazeState, legacyBlur: 
         false
     }) {
         Box(Modifier.fillMaxSize().clip(Glass)
-        .then(if (Build.VERSION.SDK_INT >= 31) Modifier.hazeEffect(haze) {
-            blurRadius = 24.dp; noiseFactor = .025f
+        .then(if (RenderPerformance.blur31) Modifier.hazeEffect(haze) {
+            blurRadius = navBlur.dp; noiseFactor = .025f
             backgroundColor = Color(0xFF333333)
             tints = listOf(HazeTint(Color(0x40404040)))
             progressive = HazeProgressive.verticalGradient(startIntensity = 1f, endIntensity = .65f)
         } else Modifier)) {
-        if (Build.VERSION.SDK_INT < 31 && legacyBlur != null) {
-            Canvas(Modifier.fillMaxSize()) {
+        if (RenderPerformance.staticBlur && legacyBlur != null && navBlur > 0f) {
+            Canvas(Modifier.fillMaxSize().graphicsLayer { alpha = (navBlur / 24f).coerceIn(0f, 1f) }) {
                 drawCoverWallpaper(legacyBlur, IntSize(1672.dp.roundToPx(), canvasHeight.roundToPx()), IntOffset(-(((1672f - width.value) / 2) * density).toInt(), -(26 * density).toInt()))
-                drawRect(Color(0x40404040))
             }
         }
-        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .20f)))
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = navOpacity.coerceIn(0f, .9f))))
         }
         Row(Modifier.fillMaxSize().padding(5.dp), verticalAlignment = Alignment.CenterVertically) {
             tabs.forEachIndexed { i, tab ->
@@ -844,7 +1212,7 @@ private fun Header(page: String, animeko: Boolean, haze: HazeState, legacyBlur: 
                         tabFocus.requestFocus(); onPage(tab)
                     }, contentAlignment = Alignment.Center) {
                     // Current-page capsule: width stays proportional to the tab slot, so the
-                    // five-tab bar reads 115dp and the Animeko bar scales the same way (115.4dp).
+                    // four-tab bar reads 114.6dp and the Animeko bar scales the same way (115dp).
                     val currentCapsuleWidth = ((width - 10.dp) / tabs.size + 10.dp) * .8715f
                     NavigationCapsule(currentCapsuleWidth, 51.08.dp, baseReveal)
                     NavigationCapsule(capsuleWidth + 30.dp, 74.dp, raisedReveal, raised)
@@ -855,7 +1223,6 @@ private fun Header(page: String, animeko: Boolean, haze: HazeState, legacyBlur: 
             }
         }
     }
-    val context = LocalContext.current
     var time by remember { mutableStateOf("") }
     var wifi by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
@@ -894,7 +1261,7 @@ private fun NavigationCapsule(width: Dp, height: Dp, reveal: Float, selected: Bo
 }
 
 private val LocalCardReveal = compositionLocalOf { 1f }
-private val LocalCardCoverAlpha = compositionLocalOf { 1f }
+internal val LocalCardCoverAlpha = compositionLocalOf { 1f }
 
 @Composable
 internal fun FocusCard(
@@ -954,10 +1321,12 @@ internal fun FocusCard(
         .drawWithContent {
             drawContent()
             val stroke = (1f + 2f * borderEmphasis).dp.toPx()
-            if (showBorder) inset(stroke / 2f) {
-                drawOutline(shape.createOutline(size, layoutDirection, this),
-                    if (borderOnlyWhenHighlighted) White.copy(alpha = borderEmphasis) else lerp(Color(0x60808080), White, borderEmphasis),
-                    style = Stroke(stroke), blendMode = borderBlendMode)
+            if (showBorder && size.width > stroke && size.height > stroke) {
+                inset(stroke / 2f) {
+                    drawOutline(shape.createOutline(size, layoutDirection, this),
+                        if (borderOnlyWhenHighlighted) White.copy(alpha = borderEmphasis) else lerp(Color(0x60808080), White, borderEmphasis),
+                        style = Stroke(stroke), blendMode = borderBlendMode)
+                }
             }
         }
         .clip(shape).focusRequester(ownFocus).focusProperties { canFocus = true }.onFocusChanged { focused = it.isFocused }
@@ -1021,7 +1390,7 @@ private fun WatchingCard(media: DemoMedia, artwork: DemoArtwork, modifier: Modif
     FocusCard(modifier, onClick = onClick) {
         val reveal = LocalCardReveal.current
         val coverAlpha = LocalCardCoverAlpha.current
-        val realUrl = media.realItem?.posterUrl.orEmpty()
+        val realUrl = media.realItem?.backdropUrl?.ifBlank { media.realItem?.posterUrl.orEmpty() } ?: media.realItem?.posterUrl.orEmpty()
         val networkBitmap = if (realUrl.isNotBlank()) rememberPosterImage(realUrl) else null
         Image(networkBitmap ?: artwork.image(media), null, Modifier.fillMaxSize().graphicsLayer { alpha = coverAlpha }, contentScale = ContentScale.Crop)
         // Gradient slides up from below; caption fades in — synced with the return reveal.
@@ -1031,7 +1400,7 @@ private fun WatchingCard(media: DemoMedia, artwork: DemoArtwork, modifier: Modif
             Spacer(Modifier.height(12.dp))
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Progress(media.progress, Modifier.weight(1f).height(8.dp))
-                Text(media.detail, color = Color(0xFFDDDDDD), fontSize = 16.sp)
+                Text(formatMediaProgressText(media), color = Color(0xFFDDDDDD), fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
     }
@@ -1062,12 +1431,12 @@ private fun PlaybackButton(label: String, modifier: Modifier, wallpaper: HazeSta
     FocusCard(modifier, 50.dp, onClick, zoomOnFocus = false, onHighlightChanged = { highlighted = it }) {
         Box(Modifier.fillMaxSize().onGloballyPositioned { position = it.boundsInRoot().topLeft }
             .graphicsLayer { alpha = 1f - reveal }
-            .then(if (Build.VERSION.SDK_INT >= 33) Modifier.hazeEffect(wallpaper) {
+            .then(if (RenderPerformance.blur33) Modifier.hazeEffect(wallpaper) {
                 blurRadius = 24.dp; noiseFactor = 0f
                 backgroundColor = Color(0xFF333333)
                 tints = listOf(HazeTint(Color(0x40333333)))
             } else Modifier.background(Color(0x66333333)))) {
-            if (Build.VERSION.SDK_INT < 33 && legacyBlur != null) Canvas(Modifier.fillMaxSize()) {
+            if (RenderPerformance.staticBlur && legacyBlur != null) Canvas(Modifier.fillMaxSize()) {
                 drawCoverWallpaper(legacyBlur, IntSize(1672.dp.roundToPx(), canvasHeight.roundToPx()),
                     IntOffset(-position.x.toInt(), -position.y.toInt()))
                 drawRect(Color(0x40333333))
@@ -1094,15 +1463,65 @@ internal fun SectionTitle(title: String, entranceIndex: Int? = null, onAll: (() 
     Spacer(Modifier.height(LibraryDesign.titleGap))
 }
 
+/** Poster ratio known before the bitmap loads, so the card layout and the focus rows always agree. */
+internal fun categoryCardRatio(media: DemoMedia, artwork: DemoArtwork?): Float {
+    val real = media.realItem
+    if (real != null && real.primaryImageAspectRatio > 0f) return real.primaryImageAspectRatio
+    if (real == null) {
+        val bitmap = artwork?.image(media)
+        if (bitmap != null && bitmap.width > 0 && bitmap.height > 0) {
+            return bitmap.width.toFloat() / bitmap.height.toFloat()
+        }
+    }
+    val type = real?.collectionType.orEmpty().lowercase()
+    return when {
+        type.contains("music") || type.contains("audio") -> 1.0f
+        type.contains("tv") || type.contains("show") || type.contains("movie") || type.contains("film") -> 0.67f
+        media.title.contains("电影") || media.title.contains("剧") || media.title.contains("漫") -> 0.67f
+        else -> 1.77f
+    }
+}
+
+internal fun categoryCardSize(ratio: Float): Pair<Dp, Dp> = when {
+    ratio > 1.25f -> 352.dp to 198.dp // 16:9 横版
+    ratio < 0.85f -> 224.dp to 336.dp // 2:3 竖版
+    else -> 224.dp to 224.dp          // 1:1 方形
+}
+
 @Composable
-private fun CategoryCard(media: DemoMedia, artwork: DemoArtwork, modifier: Modifier, onClick: () -> Unit) {
-    FocusCard(modifier, 12.dp, onClick) {
+private fun CategoryCard(media: DemoMedia, artwork: DemoArtwork, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val realUrl = media.realItem?.posterUrl.orEmpty()
+    val networkBitmap = if (realUrl.isNotBlank()) rememberPosterImage(realUrl) else null
+    val imgBitmap = networkBitmap ?: artwork.image(media)
+
+    // Deterministic size: derived from the server ratio / local artwork / heuristic, never
+    // from the async-loaded bitmap. Otherwise the card reflows once the poster lands and the
+    // focus rows no longer match the real FlowRow wrapping (middle rows become unreachable).
+    val (cardWidth, cardHeight) = categoryCardSize(categoryCardRatio(media, artwork))
+
+    FocusCard(modifier.size(cardWidth, cardHeight), 12.dp, onClick) {
         val coverAlpha = LocalCardCoverAlpha.current
-        Image(artwork.image(media), null, Modifier.fillMaxSize().graphicsLayer { alpha = coverAlpha }, contentScale = ContentScale.Crop)
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xF00D0D0D)))))
-        Column(Modifier.align(Alignment.BottomStart).padding(24.dp)) {
-            Text(media.title, color = White, fontSize = LibraryDesign.title, lineHeight = 32.sp, fontWeight = FontWeight.Medium)
-            Text(media.detail, color = Muted, fontSize = LibraryDesign.metadata, lineHeight = 28.sp)
+        if (imgBitmap != null) {
+            Image(
+                bitmap = imgBitmap,
+                contentDescription = media.title,
+                modifier = Modifier.fillMaxSize().graphicsLayer { alpha = coverAlpha },
+                contentScale = ContentScale.Crop
+            )
+        }
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.verticalGradient(
+                    listOf(Color.Transparent, Color(0x66000000), Color(0xF20D0D0D))
+                )
+            )
+        )
+        Column(Modifier.align(Alignment.BottomStart).padding(horizontal = 20.dp, vertical = 16.dp)) {
+            Text(media.title, color = White, fontSize = LibraryDesign.title, lineHeight = 32.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (media.detail.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(media.detail, color = Muted, fontSize = LibraryDesign.metadata, lineHeight = 24.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
         }
     }
 }
@@ -1155,22 +1574,46 @@ private fun PosterSection(title: String, media: List<DemoMedia>, artwork: DemoAr
 }
 
 @Composable
-private fun Favorites(artwork: DemoArtwork, onClick: (DemoMedia) -> Unit) {
+private fun Favorites(artwork: DemoArtwork, favorites: List<DemoMedia>, onClick: (DemoMedia) -> Unit) {
     var filter by rememberSaveable { mutableStateOf("全部影视") }
     SectionSurface {
-        SectionTitle("我的收藏", entranceIndex = 17, onAll = { onClick(DemoLibrary.favorites[0]) })
-        Row(Modifier.staggeredEntrance(18).background(Color(0x50404040), Glass).border(1.dp, Color(0x60808080), Glass).padding(horizontal = 10.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            listOf("全部影视", "电影", "剧集", "动漫", "纪录片", "音乐").forEach { label ->
-                Text(label, Modifier.rowFocusTarget(row = "favoriteFilters").optionZoom().clip(Glass).background(if (filter == label) Color(0xFFDDDDDD) else Color.Transparent)
-                    .clickable { filter = label }.padding(horizontal = 28.dp, vertical = 9.dp), color = if (filter == label) Color(0xFF202020) else Muted, fontSize = 21.sp)
+        SectionTitle("我的收藏", entranceIndex = 17, onAll = if (favorites.isNotEmpty()) ({ favorites.firstOrNull()?.let(onClick) }) else null)
+        if (favorites.isEmpty()) {
+            // 空收藏时仍保留模块与标题，只放一行紧凑提示，避免整块空白占位。
+            Text("暂无收藏", color = Muted, fontSize = 22.sp, modifier = Modifier.staggeredEntrance(18))
+        } else {
+            Row(Modifier.staggeredEntrance(18).background(Color(0x50404040), Glass).border(1.dp, Color(0x60808080), Glass).padding(horizontal = 10.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                listOf("全部影视", "电影", "剧集", "动漫", "纪录片", "音乐").forEach { label ->
+                    Text(label, Modifier.rowFocusTarget(row = "favoriteFilters").optionZoom().clip(Glass).background(if (filter == label) Color(0xFFDDDDDD) else Color.Transparent)
+                        .clickable { filter = label }.padding(horizontal = 28.dp, vertical = 9.dp), color = if (filter == label) Color(0xFF202020) else Muted, fontSize = 21.sp)
+                }
             }
+            Spacer(Modifier.height(LibraryDesign.titleGap))
+            val visible = remember(filter, favorites) {
+                favorites.filter { item ->
+                    if (filter == "全部影视") true
+                    else {
+                        val real = item.realItem
+                        val cType = real?.collectionType.orEmpty().lowercase()
+                        val mType = real?.mediaType.orEmpty().lowercase()
+                        val genre = real?.genre.orEmpty()
+                        val detail = item.detail
+                        when (filter) {
+                            "电影" -> cType == "movies" || mType == "movie" || detail.contains("电影")
+                            "剧集" -> cType == "tvshows" || mType in listOf("series", "episode") || detail.contains("电视剧") || detail.contains("剧集")
+                            "动漫" -> cType == "anime" || genre.contains("动画") || genre.contains("动漫") || detail.contains("动漫") || detail.contains("动画")
+                            "纪录片" -> cType == "documentaries" || genre.contains("纪录") || detail.contains("纪录")
+                            "音乐" -> cType == "music" || mType == "music" || detail.contains("音乐") || detail.contains("首")
+                            else -> true
+                        }
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(LibraryDesign.cardGap)) {
+                visible.take(12).forEachIndexed { i, media -> PosterCard(media, artwork, focusRow = "favorites", entranceIndex = 19 + i) { onClick(media) } }
+            }
+            if (visible.isEmpty()) Text("暂无收藏", color = Muted, fontSize = 24.sp, modifier = Modifier.staggeredEntrance(19))
         }
-        Spacer(Modifier.height(LibraryDesign.titleGap))
-        val visible = DemoLibrary.favorites.filter { filter == "全部影视" || it.detail.contains(if (filter == "剧集") "电视剧" else filter) }
-        Row(horizontalArrangement = Arrangement.spacedBy(LibraryDesign.cardGap)) {
-            visible.forEachIndexed { i, media -> PosterCard(media, artwork, focusRow = "favorites", entranceIndex = 19 + i) { onClick(media) } }
-        }
-        if (visible.isEmpty()) Text("暂无收藏", color = Muted, fontSize = 24.sp, modifier = Modifier.staggeredEntrance(19).height(342.dp).padding(top = 90.dp))
     }
 }
 

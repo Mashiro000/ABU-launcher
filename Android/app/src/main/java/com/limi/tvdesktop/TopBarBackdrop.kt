@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.*
 
@@ -18,23 +19,27 @@ import dev.chrisbanes.haze.*
 @Composable
 internal fun TopBarBackdrop(source: HazeState, reveal: () -> Float) {
     val view = LocalView.current
+    val context = LocalContext.current
+    val tuningVersion = DesktopPreferences.version
+    val navBlur = remember(tuningVersion) { DesktopPreferences.GlassTuning.navBlur(context) }
+    val navOpacity = remember(tuningVersion) { DesktopPreferences.GlassTuning.navOpacity(context) }
     var hardwareAccelerated by remember(view) { mutableStateOf(view.isHardwareAccelerated) }
     Box(Modifier.fillMaxWidth().height(112.dp).onGloballyPositioned {
         hardwareAccelerated = view.isHardwareAccelerated
     }) {
-        if (Build.VERSION.SDK_INT >= 31 && hardwareAccelerated) {
+        if (RenderPerformance.blur31 && hardwareAccelerated) {
             Box(Modifier.fillMaxSize().hazeEffect(source) {
                 blurEnabled = reveal() > 0f
-                blurRadius = (20f * reveal().coerceIn(0f, 1f)).coerceAtLeast(.01f).dp
+                blurRadius = (navBlur * reveal().coerceIn(0f, 1f)).coerceAtLeast(.01f).dp
                 progressive = HazeProgressive.verticalGradient(startIntensity = 1f, endIntensity = 0f)
                 backgroundColor = Color.Transparent
                 tints = emptyList()
                 fallbackTint = HazeTint(Color.Transparent)
                 noiseFactor = 0f
-                inputScale = HazeInputScale.Fixed(.5f)
+                inputScale = HazeInputScale.Fixed(.4f)
             })
         }
         Box(Modifier.fillMaxSize().graphicsLayer { alpha = reveal().coerceIn(0f, 1f) }.background(Brush.verticalGradient(
-            listOf(Color.Black.copy(alpha = .6f), Color.Transparent))))
+            listOf(Color.Black.copy(alpha = (navOpacity * 2.5f).coerceIn(0f, .9f)), Color.Transparent))))
     }
 }

@@ -28,7 +28,7 @@ enum class PosterQuality(val displayName: String, val maxHeight: Int) {
 
 object PosterCacheManager {
     private var cacheDir: File? = null
-    private val memoryCache = object : LruCache<String, ImageBitmap>(80 * 1024 * 1024) { // 80MB
+    private val memoryCache = object : LruCache<String, ImageBitmap>(48 * 1024 * 1024) {
         override fun sizeOf(key: String, value: ImageBitmap): Int {
             return value.width * value.height * 4
         }
@@ -57,6 +57,8 @@ object PosterCacheManager {
         }
     }
 
+    fun memorySizeMB(): Int = memoryCache.size() / (1024 * 1024)
+
     fun clearCache() {
         memoryCache.evictAll()
         cacheDir?.listFiles()?.forEach { it.delete() }
@@ -65,6 +67,12 @@ object PosterCacheManager {
     fun getCacheSizeMB(): Float {
         val bytes = cacheDir?.listFiles()?.sumOf { it.length() } ?: 0L
         return bytes / (1024f * 1024f)
+    }
+
+    /** Already-decoded image for [url], if it is in the memory cache. Never blocks. */
+    fun peek(url: String, quality: PosterQuality = PosterQuality.AUTO): ImageBitmap? {
+        if (url.isBlank()) return null
+        return memoryCache.get("${quality.name}_${url.hashCode()}")
     }
 
     suspend fun loadPoster(url: String, quality: PosterQuality = PosterQuality.AUTO): ImageBitmap? {
@@ -107,7 +115,7 @@ object PosterCacheManager {
         }
         val decodeOptions = BitmapFactory.Options().apply {
             inSampleSize = sampleSize.coerceAtLeast(1)
-            inPreferredConfig = Bitmap.Config.RGB_565
+            inPreferredConfig = Bitmap.Config.ARGB_8888
         }
         return BitmapFactory.decodeFile(path, decodeOptions)
     }
@@ -115,7 +123,8 @@ object PosterCacheManager {
 
 @Composable
 fun rememberPosterImage(url: String, placeholder: ImageBitmap? = null): ImageBitmap? {
-    var image by remember(url) { mutableStateOf<ImageBitmap?>(placeholder) }
+    // Seed from the memory cache so an already-loaded image never flashes a placeholder first.
+    var image by remember(url) { mutableStateOf(PosterCacheManager.peek(url) ?: placeholder) }
     LaunchedEffect(url) {
         if (url.isNotBlank()) {
             val loaded = PosterCacheManager.loadPoster(url)

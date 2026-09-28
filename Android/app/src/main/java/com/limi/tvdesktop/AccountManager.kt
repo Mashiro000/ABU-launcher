@@ -14,6 +14,11 @@ object AccountManager {
     private const val KEY_DISPLAY_MODE = "display_mode"
     private const val KEY_POSTER_QUALITY = "poster_quality"
     private const val KEY_SHOW_DEMO = "show_demo_when_empty"
+    private const val KEY_SYNC_ON_LAUNCH = "sync_on_launch"
+    private const val KEY_HIDE_WATCHED = "hide_watched"
+    private const val KEY_SHOW_NEXT_UP = "show_next_up"
+    private const val KEY_PREFER_DIRECT_PLAY = "prefer_direct_play"
+    private const val KEY_ALLOW_INSECURE = "allow_insecure_connections"
 
     private lateinit var prefs: SharedPreferences
 
@@ -22,6 +27,11 @@ object AccountManager {
     val displayMode = mutableStateOf(LibraryDisplayMode.AGGREGATED)
     val posterQuality = mutableStateOf(PosterQuality.AUTO)
     val showDemoWhenEmpty = mutableStateOf(true)
+    val syncOnLaunch = mutableStateOf(true)
+    val hideWatched = mutableStateOf(false)
+    val showNextUp = mutableStateOf(true)
+    val preferDirectPlay = mutableStateOf(true)
+    val allowInsecureConnections = mutableStateOf(true)
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -46,6 +56,11 @@ object AccountManager {
         posterQuality.value = PosterQuality.entries.find { it.name == qualityStr } ?: PosterQuality.AUTO
 
         showDemoWhenEmpty.value = prefs.getBoolean(KEY_SHOW_DEMO, true)
+        syncOnLaunch.value = prefs.getBoolean(KEY_SYNC_ON_LAUNCH, true)
+        hideWatched.value = prefs.getBoolean(KEY_HIDE_WATCHED, false)
+        showNextUp.value = prefs.getBoolean(KEY_SHOW_NEXT_UP, true)
+        preferDirectPlay.value = prefs.getBoolean(KEY_PREFER_DIRECT_PLAY, true)
+        allowInsecureConnections.value = prefs.getBoolean(KEY_ALLOW_INSECURE, true)
     }
 
     fun saveAccounts() {
@@ -98,5 +113,16 @@ object AccountManager {
     fun setShowDemoWhenEmpty(show: Boolean) {
         showDemoWhenEmpty.value = show
         prefs.edit().putBoolean(KEY_SHOW_DEMO, show).apply()
+    }
+
+    fun setSyncOnLaunch(enabled: Boolean) = saveBoolean(KEY_SYNC_ON_LAUNCH, syncOnLaunch, enabled)
+    fun setHideWatched(enabled: Boolean) = saveBoolean(KEY_HIDE_WATCHED, hideWatched, enabled)
+    fun setShowNextUp(enabled: Boolean) = saveBoolean(KEY_SHOW_NEXT_UP, showNextUp, enabled)
+    fun setPreferDirectPlay(enabled: Boolean) = saveBoolean(KEY_PREFER_DIRECT_PLAY, preferDirectPlay, enabled)
+    fun setAllowInsecureConnections(enabled: Boolean) = saveBoolean(KEY_ALLOW_INSECURE, allowInsecureConnections, enabled)
+
+    private fun saveBoolean(key: String, state: androidx.compose.runtime.MutableState<Boolean>, value: Boolean) {
+        state.value = value
+        prefs.edit().putBoolean(key, value).apply()
     }
 }

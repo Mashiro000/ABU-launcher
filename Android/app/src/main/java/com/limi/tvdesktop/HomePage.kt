@@ -3,6 +3,7 @@ package com.limi.tvdesktop
 import android.app.ActivityOptions
 import android.content.Context
 import android.content.Intent
+import android.content.ComponentName
 import android.graphics.Bitmap
 import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.Drawable
@@ -50,6 +51,8 @@ import dev.chrisbanes.haze.*
 import kotlinx.coroutines.*
 import java.text.SimpleDateFormat
 import java.util.*
+import org.json.JSONArray
+import org.json.JSONObject
 
 private data class BannerResult(val bitmap: Bitmap, val backgroundColor: Int)
 
@@ -60,10 +63,75 @@ private data class DockApp(
     val launch: Intent,
     val bannerBgColor: Int = android.graphics.Color.rgb(38, 42, 48)
 )
-private data class DockAppSource(val name: String, val packageName: String, val banner: Drawable?, val drawable: Drawable, val launch: Intent)
+private data class DockAppSource(
+    val name: String,
+    val packageName: String,
+    val activityName: String,
+    val banner: Drawable?,
+    val drawable: Drawable,
+    val launch: Intent
+)
 private object DockAppCache {
     @Volatile var apps: List<DockApp> = emptyList()
 }
+
+private object InstalledAppSnapshot {
+    private const val PREFS = "installed_app_snapshot"
+    private const val KEY_APPS = "apps_v1"
+
+    data class Entry(val name: String, val packageName: String, val activityName: String)
+
+    fun read(context: Context): List<Entry> = runCatching {
+        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_APPS, null)
+            ?: return emptyList()
+        val array = JSONArray(raw)
+        buildList(array.length()) {
+            repeat(array.length()) { index ->
+                val item = array.getJSONObject(index)
+                add(Entry(item.getString("name"), item.getString("package"), item.getString("activity")))
+            }
+        }
+    }.getOrDefault(emptyList())
+
+    fun write(context: Context, sources: List<DockAppSource>) {
+        val array = JSONArray()
+        sources.forEach { source ->
+            array.put(JSONObject().put("name", source.name).put("package", source.packageName).put("activity", source.activityName))
+        }
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_APPS, array.toString()).apply()
+    }
+}
+
+private fun sourceFromSnapshot(context: Context, entry: InstalledAppSnapshot.Entry): DockAppSource? = runCatching {
+    val pm = context.packageManager
+    val activity = pm.getActivityInfo(ComponentName(entry.packageName, entry.activityName), 0)
+    val icon = activity.loadIcon(pm)
+    val banner = runCatching {
+        val candidate = activity.loadBanner(pm) ?: activity.applicationInfo.loadBanner(pm)
+        if (isValidBanner(candidate)) candidate else null
+    }.getOrNull()
+    DockAppSource(
+        name = entry.name,
+        packageName = entry.packageName,
+        activityName = entry.activityName,
+        banner = banner,
+        drawable = icon,
+        launch = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            .setClassName(entry.packageName, entry.activityName).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    )
+}.getOrNull()
+
+private fun processSource(context: Context, source: DockAppSource): DockApp? = runCatching {
+    val bannerRes = source.banner?.let { renderBanner(it) }
+    val bannerBitmap = bannerRes?.bitmap?.asImageBitmap()
+    DockApp(
+        source.name,
+        bannerBitmap,
+        if (bannerBitmap == null) AppIconProcessor.process(context, source.packageName, source.drawable) else null,
+        source.launch,
+        bannerRes?.backgroundColor ?: android.graphics.Color.rgb(38, 42, 48)
+    )
+}.getOrNull()
 
 private fun isValidBanner(drawable: Drawable?): Boolean {
     if (drawable == null) return false
@@ -114,6 +182,7 @@ private fun renderBanner(drawable: Drawable): BannerResult? {
 @Composable internal fun HomePage(
     wallpaperHaze: HazeState,
     artwork: DemoArtwork,
+    staticBlur: ImageBitmap?,
     first: FocusRequester,
     navigation: FocusRequester,
     onExpandProgress: (Float) -> Unit = {},
@@ -130,7 +199,7 @@ private fun renderBanner(drawable: Drawable): BannerResult? {
     var expanded by remember { mutableStateOf(false) }
     val progress by animateFloatAsState(
         targetValue = if (expanded) 1f else 0f,
-        animationSpec = tween(800, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)),
+        animationSpec = tween(if (RenderPerformance.reducedEffects) 160 else 480, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)),
         label = "home-expand-progress"
     )
 
@@ -139,6 +208,20 @@ private fun renderBanner(drawable: Drawable): BannerResult? {
     }
 
     val apps by produceState(DockAppCache.apps, context) {
+        // Restore the last known ordering first. Icon processing has its own disk cache, so a
+        // cold process can paint the launcher without waiting for a package-manager scan.
+        val savedEntries = withContext(Dispatchers.IO) { InstalledAppSnapshot.read(context) }
+        val savedSources = withContext(Dispatchers.IO) { savedEntries.mapNotNull { sourceFromSnapshot(context, it) } }
+        if (DockAppCache.apps.isEmpty() && savedSources.isNotEmpty()) {
+            val restored = withContext(Dispatchers.IO) { savedSources.mapNotNull { processSource(context, it) } }
+            if (restored.isNotEmpty()) {
+                DockAppCache.apps = restored
+                value = restored
+            }
+        }
+
+        // Refresh in the background. Only publish a new list when packages/activities or labels
+        // actually changed, avoiding the visible reload on every launch.
         val sources = withContext(Dispatchers.IO) {
             val pm = context.packageManager
             val entries = listOf(Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER)
@@ -156,6 +239,7 @@ private fun renderBanner(drawable: Drawable): BannerResult? {
                     DockAppSource(
                         name = label,
                         packageName = entry.activityInfo.packageName,
+                        activityName = entry.activityInfo.name,
                         banner = banner,
                         drawable = icon,
                         launch = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
@@ -166,20 +250,16 @@ private fun renderBanner(drawable: Drawable): BannerResult? {
             }
         }
 
+        val savedSignature = savedEntries.map { Triple(it.packageName, it.activityName, it.name) }
+        val freshSignature = sources.map { Triple(it.packageName, it.activityName, it.name) }
+        if (value.isNotEmpty() && savedSignature == freshSignature) return@produceState
+
+        withContext(Dispatchers.IO) { InstalledAppSnapshot.write(context, sources) }
+
         // Fast-path: process the first 6 dock apps immediately so they appear without waiting for all 50+ apps
         val dockSources = sources.take(6)
         val initialProcessed = withContext(Dispatchers.IO) {
-            dockSources.mapNotNull { source ->
-                runCatching {
-                    val bannerRes = source.banner?.let { renderBanner(it) }
-                    val bannerBitmap = bannerRes?.bitmap?.asImageBitmap()
-                    val bannerBg = bannerRes?.backgroundColor ?: android.graphics.Color.rgb(38, 42, 48)
-                    val icon = if (bannerBitmap == null) {
-                        AppIconProcessor.process(context, source.packageName, source.drawable)
-                    } else null
-                    DockApp(source.name, bannerBitmap, icon, source.launch, bannerBg)
-                }.getOrNull()
-            }
+            dockSources.mapNotNull { processSource(context, it) }
         }
         if (DockAppCache.apps.isEmpty()) {
             DockAppCache.apps = initialProcessed
@@ -189,17 +269,7 @@ private fun renderBanner(drawable: Drawable): BannerResult? {
         // Then process the remaining apps in background
         val remainingSources = sources.drop(6)
         val remainingProcessed = withContext(Dispatchers.IO) {
-            remainingSources.mapNotNull { source ->
-                runCatching {
-                    val bannerRes = source.banner?.let { renderBanner(it) }
-                    val bannerBitmap = bannerRes?.bitmap?.asImageBitmap()
-                    val bannerBg = bannerRes?.backgroundColor ?: android.graphics.Color.rgb(38, 42, 48)
-                    val icon = if (bannerBitmap == null) {
-                        AppIconProcessor.process(context, source.packageName, source.drawable)
-                    } else null
-                    DockApp(source.name, bannerBitmap, icon, source.launch, bannerBg)
-                }.getOrNull()
-            }
+            remainingSources.mapNotNull { processSource(context, it) }
         }
         val all = initialProcessed + remainingProcessed
         DockAppCache.apps = all
@@ -211,6 +281,8 @@ private fun renderBanner(drawable: Drawable): BannerResult? {
     val iconScale = remember(prefVersion) { DesktopPreferences.IconScale.current(context) }
     val dockStyle = remember(prefVersion) { DesktopPreferences.DockStyle.current(context) }
     val gridDensity = remember(prefVersion) { DesktopPreferences.GridDensity.current(context) }
+    val dockBlur = remember(prefVersion) { DesktopPreferences.GlassTuning.dockBlur(context) }
+    val dockOpacity = remember(prefVersion) { DesktopPreferences.GlassTuning.dockOpacity(context) }
 
     val columns = gridDensity.columns
     val scale = iconScale.scale
@@ -242,27 +314,6 @@ private fun renderBanner(drawable: Drawable): BannerResult? {
         dockRefs[0].requestFocus()
     }
 
-    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) { while (true) { now = System.currentTimeMillis(); delay(1000) } }
-    val date = Date(now)
-    val timeTextStandard = SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(date)
-    val timeTextMinimal = SimpleDateFormat("HH:mm", Locale.CHINA).format(date)
-    val gregorianDateText = SimpleDateFormat("EEEE  M月d日", Locale.CHINA).format(date)
-    val lunarDateText = remember(now / 60_000) {
-        runCatching {
-            val lunar = ChineseCalendar().apply { timeInMillis = now }
-            val months = listOf("正", "二", "三", "四", "五", "六", "七", "八", "九", "十", "冬", "腊")
-            val day = lunar.get(Calendar.DAY_OF_MONTH)
-            val numbers = listOf("一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
-            val lunarDay = when (day) {
-                10 -> "初十"; 20 -> "二十"; 30 -> "三十"
-                else -> listOf("初", "十", "廿")[((day - 1) / 10).coerceIn(0, 2)] + numbers[((day - 1) % 10).coerceIn(0, 9)]
-            }
-            val monthIdx = lunar.get(Calendar.MONTH).coerceIn(0, 11)
-            "农历" + (if (lunar.get(ChineseCalendar.IS_LEAP_MONTH) == 1) "闰" else "") + months[monthIdx] + "月" + lunarDay
-        }.getOrDefault("")
-    }
-    val fullDateText = if (lunarDateText.isNotBlank()) "$gregorianDateText  $lunarDateText" else gregorianDateText
     var dockPosition by remember { mutableStateOf(Offset.Zero) }
 
     val dockTargetY = 40.dp
@@ -280,93 +331,7 @@ private fun renderBanner(drawable: Drawable): BannerResult? {
                 },
             contentAlignment = Alignment.Center
         ) {
-            when (clockStyle) {
-                DesktopPreferences.ClockStyle.STANDARD -> {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            timeTextStandard,
-                            Modifier.staggeredEntrance(0),
-                            color = Color.White,
-                            fontSize = 136.sp,
-                            lineHeight = 148.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = (-3).sp
-                        )
-                        Spacer(Modifier.height(12.dp))
-                        Text(
-                            fullDateText,
-                            Modifier.staggeredEntrance(1),
-                            color = Color(0xE6FFFFFF),
-                            fontSize = 25.sp,
-                            letterSpacing = 1.sp
-                        )
-                    }
-                }
-                DesktopPreferences.ClockStyle.MINIMAL -> {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            timeTextMinimal,
-                            Modifier.staggeredEntrance(0),
-                            color = Color.White,
-                            fontSize = 152.sp,
-                            lineHeight = 156.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            letterSpacing = (-2).sp
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            fullDateText,
-                            Modifier.staggeredEntrance(1),
-                            color = Color(0xD0FFFFFF),
-                            fontSize = 24.sp,
-                            letterSpacing = 0.8.sp
-                        )
-                    }
-                }
-                DesktopPreferences.ClockStyle.SPLIT -> {
-                    Row(
-                        modifier = Modifier.staggeredEntrance(0),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            timeTextMinimal,
-                            color = Color.White,
-                            fontSize = 120.sp,
-                            lineHeight = 126.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = (-2).sp
-                        )
-                        Box(
-                            Modifier
-                                .padding(horizontal = 28.dp)
-                                .width(2.dp)
-                                .height(76.dp)
-                                .background(Color(0x4DFFFFFF))
-                        )
-                        Column {
-                            Text(
-                                gregorianDateText,
-                                color = Color.White,
-                                fontSize = 26.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                letterSpacing = 0.5.sp
-                            )
-                            if (lunarDateText.isNotBlank()) {
-                                Spacer(Modifier.height(6.dp))
-                                Text(
-                                    lunarDateText,
-                                    color = Color(0xCCFFFFFF),
-                                    fontSize = 22.sp,
-                                    letterSpacing = 0.5.sp
-                                )
-                            }
-                        }
-                    }
-                }
-                DesktopPreferences.ClockStyle.OFF -> {
-                    // Hidden
-                }
-            }
+            HomeClock(clockStyle)
         }
 
         // Dock Row (Top Shelf): moves smoothly from bottom to top
@@ -376,21 +341,26 @@ private fun renderBanner(drawable: Drawable): BannerResult? {
                 .width(1584.dp)
                 .height(dockHeight)
         ) {
-            val currentDockTint = Color.Black.copy(alpha = 0.2f + 0.22f * progress)
+            val currentDockTint = Color.Black.copy(alpha = dockOpacity.coerceIn(0f, .9f))
             Box(Modifier.matchParentSize().staggeredEntrance(2).onGloballyPositioned { dockPosition = it.boundsInRoot().topLeft }
                 .clip(shape)
             ) {
                 when (dockStyle) {
                     DesktopPreferences.DockStyle.GLASS -> {
-                        if (Build.VERSION.SDK_INT >= 31) {
+                        if (RenderPerformance.blur31) {
                             Box(
                                 Modifier.fillMaxSize()
                                     .graphicsLayer { alpha = (1f - progress).coerceIn(0f, 1f) }
                                     .hazeEffect(wallpaperHaze) {
-                                        blurRadius = 28.dp; noiseFactor = 0f; backgroundColor = Color.Transparent
-                                        tints = emptyList(); inputScale = HazeInputScale.Fixed(.5f)
+                                        blurRadius = dockBlur.dp; noiseFactor = 0f; backgroundColor = Color.Transparent
+                                        tints = emptyList(); inputScale = HazeInputScale.Fixed(.4f)
                                     }
                             )
+                        }
+                        if (RenderPerformance.staticBlur && staticBlur != null && dockBlur > 0f) {
+                            Canvas(Modifier.fillMaxSize().graphicsLayer { alpha = (dockBlur / 28f).coerceIn(0f, 1f) }) {
+                                drawCoverWallpaper(staticBlur, IntSize(1672.dp.roundToPx(), canvasHeight.roundToPx()), IntOffset(-dockPosition.x.toInt(), -dockPosition.y.toInt()))
+                            }
                         }
                         Box(Modifier.fillMaxSize().background(currentDockTint))
                     }
@@ -731,5 +701,123 @@ private fun createBrandGradient(baseColor: Color): Brush {
     Box(modifier) {
         previous?.let { Image(it.foreground.asImageBitmap(), name, Modifier.fillMaxSize().graphicsLayer { alpha = 1f - fade.value }, contentScale = ContentScale.Fit) }
         Image(current.foreground.asImageBitmap(), name, Modifier.fillMaxSize().graphicsLayer { alpha = fade.value }, contentScale = ContentScale.Fit)
+    }
+}
+
+
+/** Keep clock ticks outside the application grid composition. */
+@Composable
+private fun HomeClock(clockStyle: DesktopPreferences.ClockStyle) {
+    if (clockStyle == DesktopPreferences.ClockStyle.OFF) return
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(clockStyle) {
+        val interval = if (clockStyle == DesktopPreferences.ClockStyle.STANDARD) 1000L else 60_000L
+        while (true) { now = System.currentTimeMillis(); delay(interval - now % interval) }
+    }
+    val date = Date(now)
+    val timeTextStandard = SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(date)
+    val timeTextMinimal = SimpleDateFormat("HH:mm", Locale.CHINA).format(date)
+    val gregorianDateText = SimpleDateFormat("EEEE  M月d日", Locale.CHINA).format(date)
+    val lunarDateText = remember(now / 60_000) {
+        runCatching {
+            val lunar = ChineseCalendar().apply { timeInMillis = now }
+            val months = listOf("正", "二", "三", "四", "五", "六", "七", "八", "九", "十", "冬", "腊")
+            val day = lunar.get(Calendar.DAY_OF_MONTH)
+            val numbers = listOf("一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
+            val lunarDay = when (day) {
+                10 -> "初十"; 20 -> "二十"; 30 -> "三十"
+                else -> listOf("初", "十", "廿")[((day - 1) / 10).coerceIn(0, 2)] + numbers[((day - 1) % 10).coerceIn(0, 9)]
+            }
+            val monthIdx = lunar.get(Calendar.MONTH).coerceIn(0, 11)
+            "农历" + (if (lunar.get(ChineseCalendar.IS_LEAP_MONTH) == 1) "闰" else "") + months[monthIdx] + "月" + lunarDay
+        }.getOrDefault("")
+    }
+    val fullDateText = if (lunarDateText.isNotBlank()) "$gregorianDateText  $lunarDateText" else gregorianDateText
+    when (clockStyle) {
+        DesktopPreferences.ClockStyle.STANDARD -> {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    timeTextStandard,
+                    Modifier.staggeredEntrance(0),
+                    color = Color.White,
+                    fontSize = 136.sp,
+                    lineHeight = 148.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = (-3).sp
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    fullDateText,
+                    Modifier.staggeredEntrance(1),
+                    color = Color(0xE6FFFFFF),
+                    fontSize = 25.sp,
+                    letterSpacing = 1.sp
+                )
+            }
+        }
+        DesktopPreferences.ClockStyle.MINIMAL -> {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    timeTextMinimal,
+                    Modifier.staggeredEntrance(0),
+                    color = Color.White,
+                    fontSize = 152.sp,
+                    lineHeight = 156.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = (-2).sp
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    fullDateText,
+                    Modifier.staggeredEntrance(1),
+                    color = Color(0xD0FFFFFF),
+                    fontSize = 24.sp,
+                    letterSpacing = 0.8.sp
+                )
+            }
+        }
+        DesktopPreferences.ClockStyle.SPLIT -> {
+            Row(
+                modifier = Modifier.staggeredEntrance(0),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    timeTextMinimal,
+                    color = Color.White,
+                    fontSize = 120.sp,
+                    lineHeight = 126.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = (-2).sp
+                )
+                Box(
+                    Modifier
+                        .padding(horizontal = 28.dp)
+                        .width(2.dp)
+                        .height(76.dp)
+                        .background(Color(0x4DFFFFFF))
+                )
+                Column {
+                    Text(
+                        gregorianDateText,
+                        color = Color.White,
+                        fontSize = 26.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.5.sp
+                    )
+                    if (lunarDateText.isNotBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            lunarDateText,
+                            color = Color(0xCCFFFFFF),
+                            fontSize = 22.sp,
+                            letterSpacing = 0.5.sp
+                        )
+                    }
+                }
+            }
+        }
+        DesktopPreferences.ClockStyle.OFF -> {
+            // Hidden
+        }
     }
 }

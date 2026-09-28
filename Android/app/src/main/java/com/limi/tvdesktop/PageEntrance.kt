@@ -17,10 +17,10 @@ import androidx.compose.ui.unit.dp
 private val EntranceEasing = CubicBezierEasing(.16f, 1f, .3f, 1f)
 internal val PageTransitionEasing = CubicBezierEasing(.16f, 1f, .3f, 1f)
 /** Shared focus motion: quick response followed by a soft, non-bouncing settle. */
-internal fun focusMotion() = tween<Float>(240, easing = CubicBezierEasing(.2f, .8f, .2f, 1f))
+internal fun focusMotion() = tween<Float>(if (RenderPerformance.reducedEffects) 100 else 240, easing = CubicBezierEasing(.2f, .8f, .2f, 1f))
 /** A small spring on selection; deselection settles without another bounce. */
 internal fun focusScaleMotion(selected: Boolean): FiniteAnimationSpec<Float> =
-    if (selected) spring(dampingRatio = .75f, stiffness = 450f, visibilityThreshold = .001f)
+    if (selected && !RenderPerformance.reducedEffects) spring(dampingRatio = .75f, stiffness = 450f, visibilityThreshold = .001f)
     else focusMotion()
 private class EntranceRegistry(var visited: MutableState<List<String>>)
 private class EntranceTimeline {
@@ -41,6 +41,10 @@ internal fun AppEntranceHost(content: @Composable () -> Unit) {
 /** One shared clock, so lazy composition, refresh and recomposition cannot replay items. */
 @Composable
 internal fun PageEntranceScope(pageKey: String, enabled: Boolean = true, replayOnOpen: Boolean = false, content: @Composable () -> Unit) {
+    if (RenderPerformance.reducedEffects) {
+        CompositionLocalProvider(LocalTimeline provides null, content = content)
+        return
+    }
     val registry = LocalRegistry.current
     val timeline = remember(pageKey) {
         EntranceTimeline().apply {

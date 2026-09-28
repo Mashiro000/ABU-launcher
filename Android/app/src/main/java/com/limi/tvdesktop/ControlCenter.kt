@@ -7,6 +7,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
@@ -19,6 +20,7 @@ import androidx.compose.ui.*
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.*
 import androidx.compose.ui.graphics.*
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -45,6 +47,7 @@ private val PopSpring = spring<Float>(dampingRatio = .7f, stiffness = 90f)
 @OptIn(ExperimentalHazeApi::class)
 internal fun ControlCenter(
     haze: HazeState,
+    staticBlur: ImageBitmap?,
     onSettings: () -> Unit,
     onClose: () -> Unit,
 ) {
@@ -53,13 +56,15 @@ internal fun ControlCenter(
     val blurProgress = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
     var closing by remember { mutableStateOf(false) }
+    val overlayDuration = if (RenderPerformance.reducedEffects) 100 else 280
+    val panelMotion = if (RenderPerformance.reducedEffects) tween<Float>(120) else PopSpring
 
     fun close() {
         if (closing) return
         closing = true
         scope.launch {
-            val blurExit = launch { blurProgress.animateTo(0f, tween(380)) }
-            pop.animateTo(0f, PopSpring)
+            val blurExit = launch { blurProgress.animateTo(0f, tween(overlayDuration)) }
+            pop.animateTo(0f, panelMotion)
             blurExit.join()
             onClose()
         }
@@ -79,8 +84,8 @@ internal fun ControlCenter(
     }
     LaunchedEffect(Unit) { withFrameNanos { }; first.requestFocus() }
     LaunchedEffect(Unit) {
-        launch { blurProgress.animateTo(1f, tween(380)) }
-        pop.animateTo(1f, PopSpring)
+        launch { blurProgress.animateTo(1f, tween(overlayDuration)) }
+        pop.animateTo(1f, panelMotion)
     }
 
     Box(Modifier.fillMaxSize().zIndex(300f)
@@ -95,12 +100,12 @@ internal fun ControlCenter(
         // Blur the full desktop as one stationary layer. It must not share the panel's scale,
         // otherwise Haze appears to sweep horizontally while the panel opens.
         Box(Modifier.fillMaxSize()
-            .then(if (Build.VERSION.SDK_INT >= 31) Modifier.hazeEffect(haze) {
+            .then(if (RenderPerformance.blur31) Modifier.hazeEffect(haze) {
                 blurRadius = (28f * blurProgress.value).coerceAtLeast(.01f).dp
                 backgroundColor = Color.Transparent
                 tints = listOf(HazeTint(Color.Black.copy(alpha = .15f * blurProgress.value)))
                 noiseFactor = 0f
-                inputScale = HazeInputScale.Fixed(.5f)
+                inputScale = HazeInputScale.Fixed(.35f)
             } else Modifier.background(Color.Black.copy(alpha = .4f * blurProgress.value)))
             .pointerInput(Unit) {
             awaitPointerEventScope {
@@ -108,7 +113,12 @@ internal fun ControlCenter(
                     awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() }
                 }
             }
-        })
+        }) {
+            if (RenderPerformance.staticBlur && staticBlur != null) {
+                Image(staticBlur, null, Modifier.matchParentSize().graphicsLayer { alpha = blurProgress.value }, contentScale = ContentScale.Crop)
+                Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = .28f * blurProgress.value)))
+            }
+        }
         val panelShape = ContinuousCornerShape(30.dp)
         Box(Modifier.align(Alignment.CenterEnd).padding(end = 34.dp).width(820.dp).wrapContentHeight()) {
         // Keep sampling coordinates fixed; reveal the sampled surface with a moving clip.
@@ -134,12 +144,12 @@ internal fun ControlCenter(
                     return Outline.Generic(path)
                 }
             }
-        }.then(if (Build.VERSION.SDK_INT >= 31) Modifier.hazeEffect(haze) {
+        }.then(if (RenderPerformance.blur31) Modifier.hazeEffect(haze) {
             blurRadius = 102.dp
             backgroundColor = Color.Transparent
             tints = listOf(HazeTint(Color(0x99151515)))
             noiseFactor = 0f
-            inputScale = HazeInputScale.Fixed(.5f)
+            inputScale = HazeInputScale.Fixed(.4f)
         } else Modifier.background(Color(0xF0181818))))
         Column(Modifier.fillMaxWidth()
             .graphicsLayer {
