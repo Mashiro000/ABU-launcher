@@ -17,4 +17,11 @@ class PluginUiParserTest {
         repeat(14) { node = "{\"type\":\"column\",\"children\":[$node]}" }
         assertThrows(IllegalArgumentException::class.java) { PluginUiParser.parse("{\"ui\":$node}") }
     }
+
+    @Test fun parsesFormNavigationAndServiceValue() {
+        val output = PluginUiParser.parse("""{"ui":{"type":"list","children":[{"type":"input","id":"query","hint":"Search"},{"type":"toggle","id":"enabled","value":"true"},{"type":"progress","progress":0.5}]},"navigation":{"push":"settings/account"},"value":{"ok":true}}""")
+        assertEquals("input", output.ui?.children?.first()?.type)
+        assertEquals("settings/account", output.navigation?.push)
+        assertEquals(true, output.value?.getBoolean("ok"))
+    }
 }

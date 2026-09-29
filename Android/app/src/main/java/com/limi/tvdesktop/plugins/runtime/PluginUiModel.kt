@@ -9,12 +9,20 @@ data class PluginUiNode(
     val text: String? = null,
     val action: String? = null,
     val tone: String? = null,
+    val hint: String? = null,
+    val value: String? = null,
+    val asset: String? = null,
+    val progress: Float? = null,
     val children: List<PluginUiNode> = emptyList(),
 )
+
+data class PluginNavigation(val push: String? = null, val pop: Boolean = false)
 
 data class PluginRuntimeOutput(
     val ui: PluginUiNode?,
     val capabilities: List<PluginCapabilityRequest>,
+    val navigation: PluginNavigation? = null,
+    val value: JSONObject? = null,
 )
 
 data class PluginCapabilityRequest(val id: String, val capability: String, val arguments: JSONObject)
@@ -28,13 +36,19 @@ object PluginUiParser {
         var count = 0
         fun node(value: JSONObject, depth: Int): PluginUiNode {
             require(depth <= MAX_DEPTH && ++count <= MAX_NODES) { "插件页面过于复杂" }
+            val type = value.optString("type", "text").lowercase()
+            require(type in setOf("column", "row", "card", "list", "button", "input", "toggle", "image", "progress", "spacer", "text")) { "不支持的插件组件：$type" }
             val childrenJson = value.optJSONArray("children") ?: JSONArray()
             return PluginUiNode(
-                type = value.optString("type", "text").lowercase(),
+                type = type,
                 id = value.optString("id").takeIf { it.isNotBlank() },
                 text = value.optString("text").takeIf { it.isNotBlank() },
                 action = value.optString("action").takeIf { it.isNotBlank() },
                 tone = value.optString("tone").takeIf { it.isNotBlank() },
+                hint = value.optString("hint").takeIf { it.isNotBlank() },
+                value = value.optString("value").takeIf { it.isNotBlank() },
+                asset = value.optString("asset").takeIf { it.isNotBlank() },
+                progress = value.optDouble("progress").takeIf { !it.isNaN() }?.toFloat(),
                 children = (0 until childrenJson.length()).mapNotNull { childrenJson.optJSONObject(it)?.let { child -> node(child, depth + 1) } },
             )
         }
@@ -46,6 +60,12 @@ object PluginUiParser {
                     PluginCapabilityRequest(it.optString("id", index.toString()), it.optString("capability"), it.optJSONObject("arguments") ?: JSONObject())
                 }
             }.filter { it.capability.isNotBlank() },
+            navigation = root.optJSONObject("navigation")?.let {
+                val push = it.optString("push").takeIf(String::isNotBlank)
+                require(push == null || push.matches(Regex("[a-zA-Z0-9._/-]{1,100}")) && !push.contains("..")) { "插件页面路径无效" }
+                PluginNavigation(push = push, pop = it.optBoolean("pop"))
+            },
+            value = root.optJSONObject("value"),
         )
     }
 }

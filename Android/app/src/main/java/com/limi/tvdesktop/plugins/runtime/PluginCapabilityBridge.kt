@@ -3,10 +3,12 @@ package com.limi.tvdesktop.plugins.runtime
 import android.content.Context
 import android.os.Build
 import com.limi.tvdesktop.plugins.InstalledPlugin
+import com.limi.tvdesktop.plugins.PluginManager
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.net.URI
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 
 sealed interface CapabilityResult {
@@ -19,7 +21,7 @@ sealed interface CapabilityResult {
 class PluginCapabilityBridge(context: Context) {
     private val app = context.applicationContext
     private val permissions = PluginPermissionStore(app)
-    private val http = OkHttpClient.Builder().callTimeout(10, TimeUnit.SECONDS).build()
+    private val http = OkHttpClient.Builder().callTimeout(10, TimeUnit.SECONDS).followRedirects(false).build()
 
     fun execute(plugin: InstalledPlugin, request: PluginCapabilityRequest): CapabilityResult {
         val declared = plugin.permissions.map { it.id }.toSet()
@@ -55,11 +57,15 @@ class PluginCapabilityBridge(context: Context) {
                     CapabilityResult.Success(JSONObject().put("published", ok))
                 }
                 "services.register" -> {
-                    PluginServiceRegistry.register(plugin.id, request.arguments.getString("name"), request.arguments.optInt("version", 1))
+                    val name = request.arguments.getString("name")
+                    val version = request.arguments.optInt("version", 1)
+                    require(plugin.services.any { it.name == name && it.version == version }) { "服务未在清单中声明" }
+                    PluginServiceRegistry.register(plugin.id, name, version)
                     CapabilityResult.Success(JSONObject().put("ok", true))
                 }
                 "services.resolve" -> {
                     val descriptor = PluginServiceRegistry.resolve(request.arguments.getString("owner"), request.arguments.getString("name"), request.arguments.optInt("minimumVersion", 1))
+                        ?.takeIf { found -> PluginManager.get(app).installed().any { it.id == found.ownerPluginId && it.enabled } }
                     CapabilityResult.Success(JSONObject().apply {
                         put("found", descriptor != null)
                         descriptor?.let { put("owner", it.ownerPluginId).put("name", it.name).put("version", it.version) }
@@ -81,9 +87,17 @@ class PluginCapabilityBridge(context: Context) {
         require(uri.scheme == "https") { "只允许 HTTPS" }
         require(plugin.networkDomains.any { it.equals(uri.host, true) }) { "域名不在插件白名单" }
         http.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
-            val body = response.body?.string().orEmpty()
-            require(body.length <= 512 * 1024) { "响应过大" }
-            return CapabilityResult.Success(JSONObject().put("status", response.code).put("body", body))
+            val output = ByteArrayOutputStream()
+            response.body?.byteStream()?.use { input ->
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    require(output.size() + count <= 512 * 1024) { "响应过大" }
+                    output.write(buffer, 0, count)
+                }
+            }
+            return CapabilityResult.Success(JSONObject().put("status", response.code).put("body", output.toString(Charsets.UTF_8.name())))
         }
     }
 }

@@ -4,7 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:example": "tsc -p examples/hello/tsconfig.json && node tools/pack.mjs examples/hello"
+    "build:example": "tsc -p examples/hello/tsconfig.json && node tools/pack.mjs examples/hello",
+    "build:examples": "node tools/build-examples.mjs",
+    "create:plugin": "node tools/create-plugin.mjs",
+    "validate:example": "node tools/validate.mjs dist/com.example.hello-1.0.0.abu-plugin",
+    "test:tools": "node --test tools/*.test.mjs"
   },
   "devDependencies": {
     "typescript": "^5.9.2"

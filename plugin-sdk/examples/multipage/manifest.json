@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.multipage",
+  "name": "Multi-page settings",
+  "version": "1.0.0",
+  "author": "ABU SDK Example",
+  "description": "Navigation, list, form and persistent state",
+  "kind": "ui",
+  "entry": "dist/index.js",
+  "hostApi": ">=1.1.0 <2.0.0",
+  "surfaces": ["home"],
+  "slots": [],
+  "permissions": [{ "id": "storage", "title": "保存显示名称", "sensitive": false }],
+  "networkDomains": [],
+  "services": []
+}

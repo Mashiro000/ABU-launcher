@@ -10,6 +10,8 @@ data class PluginPermission(
     val sensitive: Boolean = false,
 )
 
+data class PluginServiceDeclaration(val name: String, val version: Int)
+
 data class InstalledPlugin(
     val id: String,
     val name: String,
@@ -26,6 +28,7 @@ data class InstalledPlugin(
     val surfaces: List<String> = emptyList(),
     val slots: List<String> = emptyList(),
     val networkDomains: List<String> = emptyList(),
+    val services: List<PluginServiceDeclaration> = emptyList(),
 )
 
 data class PluginRepository(

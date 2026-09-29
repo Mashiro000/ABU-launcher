@@ -1,5 +1,6 @@
 package com.limi.tvdesktop.plugins.runtime
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -11,6 +12,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -26,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.filter
 import org.json.JSONObject
+import java.io.File
 
 @Composable
 fun PluginSurfaceHost(plugin: InstalledPlugin, surface: String, modifier: Modifier = Modifier) {
@@ -37,24 +40,44 @@ fun PluginSurfaceHost(plugin: InstalledPlugin, surface: String, modifier: Modifi
     val scope = rememberCoroutineScope()
     var node by remember(plugin.id) { mutableStateOf<PluginUiNode?>(null) }
     var error by remember(plugin.id) { mutableStateOf<String?>(null) }
+    var routes by remember(plugin.id, surface) { mutableStateOf(listOf("root")) }
+    val values = remember(plugin.id, surface) { mutableStateMapOf<String, String>() }
     var consent by remember { mutableStateOf<Pair<PluginConsentRequest, CompletableDeferred<Boolean>>?>(null) }
     DisposableEffect(client) { onDispose(client::close) }
 
     suspend fun invoke(method: String, input: JSONObject) {
         runCatching {
-            session.invoke(method, input) { request ->
+            session.invokeOutput(method, input, requestConsent = { request ->
                 val answer = CompletableDeferred<Boolean>()
                 consent = request to answer
                 answer.await().also { consent = null }
-            }
+            })
         }.fold(
-            onSuccess = { node = it; error = null },
+            onSuccess = { output ->
+                output.ui?.let { node = it }
+                error = null
+                val navigation = output.navigation
+                val next = when {
+                    method == "render" -> null
+                    navigation?.push != null && routes.size < 16 -> routes + navigation.push
+                    navigation?.pop == true && routes.size > 1 -> routes.dropLast(1)
+                    else -> null
+                }
+                if (next != null) {
+                    routes = next
+                    invoke("render", JSONObject().put("surface", surface).put("route", routes.last()))
+                }
+            },
             onFailure = { error = "插件运行失败：${it.message}" },
         )
     }
 
     LaunchedEffect(plugin.id, plugin.version, surface) {
-        invoke("render", JSONObject().put("surface", surface))
+        invoke("render", JSONObject().put("surface", surface).put("route", routes.last()))
+    }
+    BackHandler(enabled = routes.size > 1) {
+        routes = routes.dropLast(1)
+        scope.launch { invoke("render", JSONObject().put("surface", surface).put("route", routes.last())) }
     }
     LaunchedEffect(plugin.id, plugin.version) {
         PluginEventBus.events.filter { it.sourcePluginId != plugin.id }.collect { event ->
@@ -63,9 +86,23 @@ fun PluginSurfaceHost(plugin: InstalledPlugin, surface: String, modifier: Modifi
     }
     Box(modifier.fillMaxSize().padding(42.dp), contentAlignment = Alignment.Center) {
         when {
-            node != null -> PluginUiRenderer(node!!, onAction = { action ->
-                scope.launch { invoke("onAction", JSONObject().put("surface", surface).put("action", action)) }
-            }, modifier = Modifier.fillMaxSize())
+            node != null -> PluginUiRenderer(
+                node!!,
+                onAction = { action ->
+                    scope.launch {
+                        invoke("onAction", JSONObject().put("surface", surface).put("route", routes.last())
+                            .put("action", action).put("values", JSONObject(values.toMap())))
+                    }
+                },
+                onInput = { id, value -> values[id] = value },
+                resolveAsset = { asset ->
+                    val root = manager.currentVersionDir(plugin.id)
+                    val file = root?.let { File(it, asset) }
+                    file?.takeIf { asset.startsWith("assets/") && !asset.contains("..") &&
+                        it.canonicalPath.startsWith(File(root, "assets").canonicalPath + File.separator) }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
             error != null -> Text(error!!, color = Color(0xFFFF8A80), fontSize = 20.sp)
             else -> Text("正在加载 ${plugin.name}…", color = Color(0xFFA5ACB8), fontSize = 20.sp)
         }

@@ -3,6 +3,7 @@ package com.limi.tvdesktop.plugins
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
+import com.limi.tvdesktop.plugins.runtime.PluginServiceRegistry
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -21,6 +22,9 @@ class PluginManager private constructor(private val context: Context) {
 
     init {
         recoverInterruptedOperations()
+        installed().filter(InstalledPlugin::enabled).forEach { plugin ->
+            plugin.services.forEach { PluginServiceRegistry.register(plugin.id, it.name, it.version) }
+        }
     }
 
     fun repositories(): List<PluginRepository> {
@@ -47,9 +51,12 @@ class PluginManager private constructor(private val context: Context) {
     fun setEnabled(id: String, enabled: Boolean) {
         val dir = safePluginDir(id)
         require(File(dir, "manifest.json").isFile) { "插件不存在" }
+        if (enabled) requireHostApi(JSONObject(File(dir, "manifest.json").readText()))
+        else PluginServiceRegistry.unregisterPlugin(id)
         prefs.edit().putBoolean("enabled.$id", enabled)
             .also { if (enabled) it.putString("last_enabled_plugin", id) }
             .apply()
+        if (enabled) readInstalled(dir)?.services?.forEach { PluginServiceRegistry.register(id, it.name, it.version) }
     }
 
     fun activateVersion(id: String, version: String): InstalledPlugin {
@@ -58,8 +65,13 @@ class PluginManager private constructor(private val context: Context) {
         require(versionDir.isDirectory && File(versionDir, "manifest.json").isFile) { "插件版本不存在" }
         val manifest = JSONObject(File(versionDir, "manifest.json").readText())
         require(manifest.getString("id") == id && manifest.getString("version") == version) { "插件版本清单不匹配" }
+        requireHostApi(manifest)
         writeAtomically(File(pluginRoot, "current"), version)
         writeAtomically(File(pluginRoot, "manifest.json"), manifest.toString(2))
+        PluginServiceRegistry.unregisterPlugin(id)
+        if (prefs.getBoolean("enabled.$id", false)) readInstalled(pluginRoot)?.services?.forEach {
+            PluginServiceRegistry.register(id, it.name, it.version)
+        }
         return requireNotNull(readInstalled(pluginRoot)) { "插件版本切换失败" }
     }
 
@@ -127,10 +139,19 @@ class PluginManager private constructor(private val context: Context) {
             require(ID_PATTERN.matches(id)) { "插件 ID 无效" }
             require(VERSION_PATTERN.matches(version)) { "插件版本无效" }
             require(manifest.optInt("schemaVersion") == 1) { "不支持的插件清单版本" }
+            requireHostApi(manifest)
             val kind = runCatching { PluginKind.valueOf(manifest.getString("kind").uppercase()) }
                 .getOrElse { throw IllegalArgumentException("插件类型无效") }
             val entry = manifest.optString("entry")
+            val services = manifest.optJSONArray("services") ?: JSONArray()
+            for (i in 0 until services.length()) {
+                val service = services.optJSONObject(i) ?: throw IllegalArgumentException("服务声明无效")
+                require(service.optString("name").matches(Regex("[a-zA-Z0-9._-]{1,100}")) && service.optInt("version") > 0) { "服务声明无效" }
+            }
             if (kind != PluginKind.PLAYER) {
+                require(staging.walkTopDown().filter(File::isFile).none { it.extension.lowercase() in setOf("so", "dex", "apk") }) {
+                    "脚本插件不能包含原生代码或 APK"
+                }
                 require(entry.isNotBlank() && !entry.startsWith('/') && !entry.contains("..")) { "脚本插件入口无效" }
                 val entryFile = File(staging, entry)
                 require(entryFile.canonicalPath.startsWith(staging.canonicalPath + File.separator) && entryFile.isFile) { "插件入口不存在" }
@@ -150,6 +171,10 @@ class PluginManager private constructor(private val context: Context) {
             writeAtomically(File(pluginRoot, "trust"), trust.name)
             verification?.let { writeAtomically(File(pluginRoot, "publisher"), PluginSignatureVerifier.fingerprint(it.publicKeyBase64)) }
             writeAtomically(File(pluginRoot, "current"), version)
+            PluginServiceRegistry.unregisterPlugin(id)
+            if (prefs.getBoolean("enabled.$id", false)) readInstalled(pluginRoot)?.services?.forEach {
+                PluginServiceRegistry.register(id, it.name, it.version)
+            }
             pruneVersions(pluginRoot, version)
             return requireNotNull(readInstalled(pluginRoot))
         } finally {
@@ -158,6 +183,7 @@ class PluginManager private constructor(private val context: Context) {
     }
 
     fun uninstall(id: String) {
+        PluginServiceRegistry.unregisterPlugin(id)
         val dir = safePluginDir(id)
         if (dir.exists()) dir.deleteRecursively()
         prefs.edit().remove("enabled.$id").apply()
@@ -197,6 +223,11 @@ class PluginManager private constructor(private val context: Context) {
             surfaces = manifest.stringList("surfaces"),
             slots = manifest.stringList("slots"),
             networkDomains = manifest.stringList("networkDomains"),
+            services = (manifest.optJSONArray("services") ?: JSONArray()).let { array ->
+                (0 until array.length()).mapNotNull { index -> array.optJSONObject(index)?.let {
+                    PluginServiceDeclaration(it.optString("name"), it.optInt("version"))
+                } }
+            },
         )
     }.getOrNull()
 
@@ -238,6 +269,13 @@ class PluginManager private constructor(private val context: Context) {
     private fun safePluginDir(id: String): File {
         require(ID_PATTERN.matches(id)) { "插件 ID 无效" }
         return File(root, id)
+    }
+
+    private fun requireHostApi(manifest: JSONObject) {
+        val hostApi = manifest.optString("hostApi")
+        require(hostApi.isBlank() || PluginHostApi.supports(hostApi)) {
+            "插件要求的宿主 API $hostApi 与当前 ${PluginHostApi.VERSION} 不兼容"
+        }
     }
 
     private fun saveRepositories(repositories: List<PluginRepository>) {

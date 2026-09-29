@@ -48,7 +48,11 @@ class PluginSandboxService : Service() {
                     $source
                     (() => {
                       const api = globalThis.ABUPlugin;
-                      if (!api || typeof api[${jsString(method)}] !== "function") throw new Error("plugin method missing");
+                      if (!api) throw new Error("ABUPlugin export missing");
+                      if (typeof api[${jsString(method)}] !== "function") {
+                        if (${jsString(method)} === "onEvent") return JSON.stringify({});
+                        throw new Error("plugin method missing: " + ${jsString(method)});
+                      }
                       const value = api[${jsString(method)}](JSON.parse(${jsString(input)}));
                       if (value && typeof value.then === "function") throw new Error("async plugin methods are not supported");
                       return JSON.stringify(value ?? null);

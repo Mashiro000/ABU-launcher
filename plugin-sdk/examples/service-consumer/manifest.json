@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.service-consumer",
+  "name": "Library service consumer",
+  "version": "1.0.0",
+  "author": "ABU SDK Example",
+  "kind": "ui",
+  "entry": "dist/index.js",
+  "hostApi": ">=1.1.0 <2.0.0",
+  "surfaces": ["home"],
+  "slots": [],
+  "permissions": [],
+  "networkDomains": [],
+  "services": []
+}

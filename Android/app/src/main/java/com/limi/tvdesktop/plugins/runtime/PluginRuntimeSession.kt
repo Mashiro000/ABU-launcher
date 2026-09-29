@@ -19,14 +19,25 @@ class PluginRuntimeSession(
         method: String,
         input: JSONObject,
         requestConsent: suspend (PluginConsentRequest) -> Boolean,
-    ): PluginUiNode? {
+    ): PluginUiNode? = invokeOutput(method, input, requestConsent).ui
+
+    suspend fun invokeOutput(
+        method: String,
+        input: JSONObject,
+        requestConsent: suspend (PluginConsentRequest) -> Boolean,
+        allowServiceCalls: Boolean = true,
+    ): PluginRuntimeOutput {
         val source = manager.readEntryScript(plugin.id) ?: throw IllegalStateException("插件入口不可用")
         var output = execute(source, method, input)
+        val navigation = output.navigation
         repeat(MAX_CAPABILITY_ROUNDS) {
-            if (output.capabilities.isEmpty()) return output.ui
+            if (output.capabilities.isEmpty()) return output.copy(navigation = output.navigation ?: navigation)
             val results = JSONArray()
             for (request in output.capabilities) {
-                var result = withContext(Dispatchers.IO) { bridge.execute(plugin, request) }
+                var result = if (request.capability == "services.call") {
+                    if (allowServiceCalls) callService(request, requestConsent)
+                    else CapabilityResult.Rejected("服务调用不能嵌套")
+                } else withContext(Dispatchers.IO) { bridge.execute(plugin, request) }
                 if (result is CapabilityResult.NeedsConsent) {
                     val declaration = plugin.permissions.firstOrNull { it.id == result.permission }
                     val granted = requestConsent(
@@ -48,6 +59,28 @@ class PluginRuntimeSession(
         }
         throw IllegalStateException("插件能力调用轮次过多")
     }
+
+    private suspend fun callService(
+        request: PluginCapabilityRequest,
+        requestConsent: suspend (PluginConsentRequest) -> Boolean,
+    ): CapabilityResult = runCatching {
+        val owner = request.arguments.getString("owner")
+        val name = request.arguments.getString("name")
+        val minimumVersion = request.arguments.optInt("minimumVersion", 1)
+        val method = request.arguments.getString("method")
+        require(method.matches(Regex("[A-Za-z][A-Za-z0-9_]{0,63}"))) { "服务方法无效" }
+        require(owner != plugin.id) { "不能调用自身服务" }
+        val descriptor = PluginServiceRegistry.resolve(owner, name, minimumVersion)
+            ?: return@runCatching CapabilityResult.Rejected("服务不可用或版本不兼容")
+        val provider = manager.installed().firstOrNull { it.id == owner && it.enabled && it.entry != null }
+            ?: return@runCatching CapabilityResult.Rejected("服务提供方未启用")
+        require(descriptor.ownerPluginId == provider.id) { "服务提供方不匹配" }
+        val providerSession = PluginRuntimeSession(provider, manager, sandbox, bridge)
+        val input = JSONObject().put("callerPluginId", plugin.id).put("service", name)
+            .put("method", method).put("arguments", request.arguments.optJSONObject("arguments") ?: JSONObject())
+        val output = providerSession.invokeOutput("onService", input, requestConsent, allowServiceCalls = false)
+        CapabilityResult.Success(output.value ?: JSONObject())
+    }.getOrElse { CapabilityResult.Rejected(it.message ?: "服务调用失败") }
 
     private suspend fun execute(source: String, method: String, input: JSONObject): PluginRuntimeOutput {
         val json = sandbox.execute(plugin.id, source, method, input.toString()).getOrThrow()

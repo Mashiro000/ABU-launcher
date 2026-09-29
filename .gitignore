@@ -18,6 +18,10 @@ build/
 release_apk/
 *.apk
 *.abu-plugin
+node_modules/
+.pnpm-store/
+plugin-sdk/.pack/
+plugin-sdk/dist/
 dist/
 .release-secrets/
 official-plugin-repository/

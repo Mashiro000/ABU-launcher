@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.service-provider",
+  "name": "Library service provider",
+  "version": "1.0.0",
+  "author": "ABU SDK Example",
+  "kind": "system",
+  "entry": "dist/index.js",
+  "hostApi": ">=1.1.0 <2.0.0",
+  "surfaces": [],
+  "slots": [],
+  "permissions": [],
+  "networkDomains": [],
+  "services": [{ "name": "library", "version": 1 }]
+}
