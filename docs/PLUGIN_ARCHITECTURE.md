@@ -83,10 +83,12 @@ lib/x86_64/*.so
 默认索引：
 
 ```text
-https://github.com/Mashiro000/ABU-launcher/releases/latest/download/plugins.json
+https://github.com/Mashiro000/ABU-plugins/releases/latest/download/plugins.json
 ```
 
 用户可添加第三方 HTTPS 索引。索引提供插件版本、ABI 资产 URL、大小、SHA-256、签名与权限摘要。
+
+开发者快速开始、API、打包与官方库投稿说明见 [`plugin-sdk/README.md`](../plugin-sdk/README.md)。官方库投稿规则见 [ABU-plugins/CONTRIBUTING.md](https://github.com/Mashiro000/ABU-plugins/blob/main/CONTRIBUTING.md)。
 
 ## 实施阶段
 

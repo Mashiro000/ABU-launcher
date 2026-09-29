@@ -69,6 +69,8 @@
 - **视频引擎**：AndroidX Media3 ExoPlayer 1.4.1（默认）与可选 MPV 插件
 - **插件脚本沙箱**：QuickJS；Ed25519 签名校验；独立 Android Service 隔离执行
 
+插件开发者请从 [ABU Plugin SDK 开发指南](plugin-sdk/README.md) 开始；申请收录到应用内官方库请阅读 [官方插件库投稿指南](https://github.com/Mashiro000/ABU-plugins/blob/main/CONTRIBUTING.md)。
+
 ---
 
 ## 📂 项目结构
