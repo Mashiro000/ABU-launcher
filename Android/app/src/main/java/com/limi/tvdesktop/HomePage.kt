@@ -51,6 +51,8 @@ import dev.chrisbanes.haze.*
 import kotlinx.coroutines.*
 import java.text.SimpleDateFormat
 import java.util.*
+import java.io.File
+import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -61,7 +63,9 @@ private data class DockApp(
     val banner: ImageBitmap?,
     val icon: ProcessedAppIcon?,
     val launch: Intent,
-    val bannerBgColor: Int = android.graphics.Color.rgb(38, 42, 48)
+    val bannerBgColor: Int = android.graphics.Color.rgb(38, 42, 48),
+    val packageName: String,
+    val activityName: String
 )
 private data class DockAppSource(
     val name: String,
@@ -73,6 +77,62 @@ private data class DockAppSource(
 )
 private object DockAppCache {
     @Volatile var apps: List<DockApp> = emptyList()
+}
+
+/** Small LRU for decoded visuals. Metadata for every app is cheap; only recently visible card
+ * bitmaps remain resident. */
+private object DockVisualMemoryCache {
+    private const val MAX_ENTRIES = 36
+    private val entries = object : LinkedHashMap<String, DockApp>(MAX_ENTRIES, .75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, DockApp>?) = size > MAX_ENTRIES
+    }
+    private fun key(packageName: String, activityName: String) = "$packageName/$activityName"
+    @Synchronized fun get(app: DockApp): DockApp? = entries[key(app.packageName, app.activityName)]
+    @Synchronized fun put(app: DockApp) { entries[key(app.packageName, app.activityName)] = app }
+}
+
+/** Fixed-size persistent TV-banner cache. Avoid decoding and uploading full-resolution banners
+ * every time the launcher process starts. */
+private object AppBannerCache {
+    private const val WIDTH = 512
+    private const val HEIGHT = 288
+    private const val VERSION = 1
+
+    private fun baseFile(context: Context, packageName: String): File {
+        val digest = MessageDigest.getInstance("SHA-256").digest(packageName.toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        return File(context.cacheDir, "app-banners/v$VERSION-$digest")
+    }
+
+    fun read(context: Context, packageName: String, sourceUpdatedAt: Long): BannerResult? = runCatching {
+        val base = baseFile(context, packageName)
+        val meta = File(base.path + ".meta").readText().split(',')
+        if (meta[0].toLong() != sourceUpdatedAt) return null
+        val bitmap = android.graphics.BitmapFactory.decodeFile(base.path + ".png") ?: return null
+        BannerResult(bitmap, meta[1].toInt())
+    }.getOrNull()
+
+    fun write(context: Context, packageName: String, sourceUpdatedAt: Long, result: BannerResult) = runCatching {
+        val base = baseFile(context, packageName)
+        base.parentFile?.mkdirs()
+        File(base.path + ".png").outputStream().use {
+            result.bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+        }
+        File(base.path + ".meta").writeText("$sourceUpdatedAt,${result.backgroundColor}")
+    }
+
+    fun render(context: Context, source: DockAppSource): BannerResult? {
+        // Package lastUpdateTime is only queried for banner apps and makes stale cache
+        // invalidation deterministic.
+        val packageUpdatedAt = runCatching {
+            context.packageManager.getPackageInfo(source.packageName, 0).lastUpdateTime
+        }.getOrDefault(0L)
+        read(context, source.packageName, packageUpdatedAt)?.let { return it }
+        val drawable = source.banner ?: return null
+        val result = renderBanner(drawable, WIDTH, HEIGHT) ?: return null
+        write(context, source.packageName, packageUpdatedAt, result)
+        return result
+    }
 }
 
 private object InstalledAppSnapshot {
@@ -122,16 +182,51 @@ private fun sourceFromSnapshot(context: Context, entry: InstalledAppSnapshot.Ent
 }.getOrNull()
 
 private fun processSource(context: Context, source: DockAppSource): DockApp? = runCatching {
-    val bannerRes = source.banner?.let { renderBanner(it) }
+    val bannerRes = if (source.banner != null) AppBannerCache.render(context, source) else null
     val bannerBitmap = bannerRes?.bitmap?.asImageBitmap()
     DockApp(
         source.name,
         bannerBitmap,
         if (bannerBitmap == null) AppIconProcessor.process(context, source.packageName, source.drawable) else null,
         source.launch,
-        bannerRes?.backgroundColor ?: android.graphics.Color.rgb(38, 42, 48)
-    )
+        bannerRes?.backgroundColor ?: android.graphics.Color.rgb(38, 42, 48),
+        source.packageName,
+        source.activityName
+    ).also(DockVisualMemoryCache::put)
 }.getOrNull()
+
+private fun snapshotApp(entry: InstalledAppSnapshot.Entry) = DockApp(
+    name = entry.name,
+    banner = null,
+    icon = null,
+    launch = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        .setClassName(entry.packageName, entry.activityName).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+    packageName = entry.packageName,
+    activityName = entry.activityName
+)
+
+private fun sourceApp(source: DockAppSource) = DockApp(
+    name = source.name,
+    banner = null,
+    icon = null,
+    launch = source.launch,
+    packageName = source.packageName,
+    activityName = source.activityName
+)
+
+@Composable
+private fun rememberVisualApp(app: DockApp): DockApp {
+    val context = LocalContext.current
+    return produceState(initialValue = DockVisualMemoryCache.get(app) ?: app, app.packageName, app.activityName) {
+        if (value.banner != null || value.icon != null) return@produceState
+        value = withContext(Dispatchers.IO) {
+            DockVisualMemoryCache.get(app) ?: sourceFromSnapshot(
+                context,
+                InstalledAppSnapshot.Entry(app.name, app.packageName, app.activityName)
+            )?.let { processSource(context, it) } ?: app
+        }
+    }.value
+}
 
 private fun isValidBanner(drawable: Drawable?): Boolean {
     if (drawable == null) return false
@@ -148,10 +243,12 @@ private fun isValidBanner(drawable: Drawable?): Boolean {
     return true
 }
 
-private fun renderBanner(drawable: Drawable): BannerResult? {
+private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeight: Int = 288): BannerResult? {
     return runCatching {
-        val width = if (drawable.intrinsicWidth > 0) drawable.intrinsicWidth else 320
-        val height = if (drawable.intrinsicHeight > 0) drawable.intrinsicHeight else 180
+        // Cards are roughly 230x132 at the reference resolution. 512x288 retains sharpness at
+        // focus zoom while preventing multi-megapixel launcher banners from exhausting GPU RAM.
+        val width = targetWidth
+        val height = targetHeight
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = android.graphics.Canvas(bitmap)
         val old = drawable.bounds
@@ -211,13 +308,22 @@ private fun renderBanner(drawable: Drawable): BannerResult? {
         // Restore the last known ordering first. Icon processing has its own disk cache, so a
         // cold process can paint the launcher without waiting for a package-manager scan.
         val savedEntries = withContext(Dispatchers.IO) { InstalledAppSnapshot.read(context) }
-        val savedSources = withContext(Dispatchers.IO) { savedEntries.mapNotNull { sourceFromSnapshot(context, it) } }
-        if (DockAppCache.apps.isEmpty() && savedSources.isNotEmpty()) {
-            val restored = withContext(Dispatchers.IO) { savedSources.mapNotNull { processSource(context, it) } }
-            if (restored.isNotEmpty()) {
-                DockAppCache.apps = restored
-                value = restored
+        if (DockAppCache.apps.isEmpty() && savedEntries.isNotEmpty()) {
+            // Restore the visible Dock first instead of making it wait behind the whole grid.
+            val restoredDock = withContext(Dispatchers.IO) {
+                savedEntries.take(6).mapNotNull { entry ->
+                    sourceFromSnapshot(context, entry)?.let { processSource(context, it) }
+                }
             }
+            if (restoredDock.isNotEmpty()) {
+                DockAppCache.apps = restoredDock
+                value = restoredDock
+            }
+
+            // The grid is metadata-only. LazyColumn loads visuals only for visible rows.
+            val restored = restoredDock + savedEntries.drop(6).map(::snapshotApp)
+            DockAppCache.apps = restored
+            value = restored
         }
 
         // Refresh in the background. Only publish a new list when packages/activities or labels
@@ -267,11 +373,7 @@ private fun renderBanner(drawable: Drawable): BannerResult? {
         }
 
         // Then process the remaining apps in background
-        val remainingSources = sources.drop(6)
-        val remainingProcessed = withContext(Dispatchers.IO) {
-            remainingSources.mapNotNull { processSource(context, it) }
-        }
-        val all = initialProcessed + remainingProcessed
+        val all = initialProcessed + sources.drop(6).map(::sourceApp)
         DockAppCache.apps = all
         value = all
     }
@@ -347,17 +449,17 @@ private fun renderBanner(drawable: Drawable): BannerResult? {
             ) {
                 when (dockStyle) {
                     DesktopPreferences.DockStyle.GLASS -> {
-                        if (RenderPerformance.blur31) {
+                        if (staticBlur == null && RenderPerformance.blur31) {
                             Box(
                                 Modifier.fillMaxSize()
                                     .graphicsLayer { alpha = (1f - progress).coerceIn(0f, 1f) }
                                     .hazeEffect(wallpaperHaze) {
                                         blurRadius = dockBlur.dp; noiseFactor = 0f; backgroundColor = Color.Transparent
-                                        tints = emptyList(); inputScale = HazeInputScale.Fixed(.4f)
+                                        tints = emptyList(); inputScale = HazeInputScale.Fixed(.3f)
                                     }
                             )
                         }
-                        if (RenderPerformance.staticBlur && staticBlur != null && dockBlur > 0f) {
+                        if (staticBlur != null && dockBlur > 0f) {
                             Canvas(Modifier.fillMaxSize().graphicsLayer { alpha = (dockBlur / 28f).coerceIn(0f, 1f) }) {
                                 drawCoverWallpaper(staticBlur, IntSize(1672.dp.roundToPx(), canvasHeight.roundToPx()), IntOffset(-dockPosition.x.toInt(), -dockPosition.y.toInt()))
                             }
@@ -384,6 +486,7 @@ private fun renderBanner(drawable: Drawable): BannerResult? {
                 repeat(6) { index ->
                     val app = dockApps.getOrNull(index)
                     if (app != null) {
+                        val visualApp = rememberVisualApp(app)
                         FocusCard(
                             Modifier.weight(1f).height(cardHeight).staggeredEntrance(3 + index)
                                 .focusRequester(dockRefs[index])
@@ -435,13 +538,14 @@ private fun renderBanner(drawable: Drawable): BannerResult? {
                                 DetailOrigin.retainedFocus = null
                             }
                         ) {
-                            if (app.banner != null) {
-                                Box(Modifier.fillMaxSize().background(Color(app.bannerBgColor)))
-                                Image(app.banner, app.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                            } else if (app.icon != null) {
-                                val color = Color(app.icon.backgroundColor)
-                                Box(Modifier.fillMaxSize().background(createBrandGradient(color)))
-                                DockAppArtwork(app.icon, app.name, Modifier.align(Alignment.Center).size(artworkSize))
+                            if (visualApp.banner != null) {
+                                Box(Modifier.fillMaxSize().background(Color(visualApp.bannerBgColor)))
+                                Image(visualApp.banner, visualApp.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                            } else if (visualApp.icon != null) {
+                                val color = Color(visualApp.icon.backgroundColor)
+                                val gradient = remember(visualApp.icon.backgroundColor) { createBrandGradient(color) }
+                                Box(Modifier.fillMaxSize().background(gradient))
+                                DockAppArtwork(visualApp.icon, visualApp.name, Modifier.align(Alignment.Center).size(artworkSize))
                             }
                         }
                     } else {
@@ -605,21 +709,17 @@ private fun GridAppItem(
     cardModifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
+    val visualApp = rememberVisualApp(app)
     var isFocused by remember { mutableStateOf(false) }
     val labelAlpha by animateFloatAsState(
         targetValue = if (isFocused) 1f else 0f,
         animationSpec = tween(220, easing = CubicBezierEasing(0.2f, 0.8f, 0.2f, 1f)),
         label = "grid-app-label"
     )
-    val bringIntoView = remember { BringIntoViewRequester() }
-    LaunchedEffect(isFocused) {
-        if (isFocused) {
-            withFrameNanos { }
-            bringIntoView.bringIntoView()
-        }
-    }
     Column(
-        modifier = modifier.bringIntoViewRequester(bringIntoView).padding(top = 12.dp),
+        // D-pad navigation already scrolls the exact target row. A second BringIntoView request
+        // used to fight that animation and caused visible hitching on every vertical move.
+        modifier = modifier.padding(top = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         FocusCard(
@@ -630,13 +730,14 @@ private fun GridAppItem(
             onHighlightChanged = { isFocused = it },
             onClick = onClick
         ) {
-            if (app.banner != null) {
-                Box(Modifier.fillMaxSize().background(Color(app.bannerBgColor)))
-                Image(app.banner, app.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-            } else if (app.icon != null) {
-                val color = Color(app.icon.backgroundColor)
-                Box(Modifier.fillMaxSize().background(createBrandGradient(color)))
-                DockAppArtwork(app.icon, app.name, Modifier.align(Alignment.Center).size(80.96.dp * iconScale))
+            if (visualApp.banner != null) {
+                Box(Modifier.fillMaxSize().background(Color(visualApp.bannerBgColor)))
+                Image(visualApp.banner, visualApp.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            } else if (visualApp.icon != null) {
+                val color = Color(visualApp.icon.backgroundColor)
+                val gradient = remember(visualApp.icon.backgroundColor) { createBrandGradient(color) }
+                Box(Modifier.fillMaxSize().background(gradient))
+                DockAppArtwork(visualApp.icon, visualApp.name, Modifier.align(Alignment.Center).size(80.96.dp * iconScale))
             }
         }
         Box(
@@ -699,8 +800,12 @@ private fun createBrandGradient(baseColor: Color): Brush {
         }
     }
     Box(modifier) {
-        previous?.let { Image(it.foreground.asImageBitmap(), name, Modifier.fillMaxSize().graphicsLayer { alpha = 1f - fade.value }, contentScale = ContentScale.Fit) }
-        Image(current.foreground.asImageBitmap(), name, Modifier.fillMaxSize().graphicsLayer { alpha = fade.value }, contentScale = ContentScale.Fit)
+        previous?.let {
+            val previousBitmap = remember(it.foreground) { it.foreground.asImageBitmap() }
+            Image(previousBitmap, name, Modifier.fillMaxSize().graphicsLayer { alpha = 1f - fade.value }, contentScale = ContentScale.Fit)
+        }
+        val currentBitmap = remember(current.foreground) { current.foreground.asImageBitmap() }
+        Image(currentBitmap, name, Modifier.fillMaxSize().graphicsLayer { alpha = fade.value }, contentScale = ContentScale.Fit)
     }
 }
 

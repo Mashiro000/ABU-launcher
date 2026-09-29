@@ -1,0 +1,12 @@
+{
+  "name": "@abu/plugin-sdk",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:example": "tsc -p examples/hello/tsconfig.json && node tools/pack.mjs examples/hello"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  }
+}

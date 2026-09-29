@@ -3,6 +3,7 @@ package com.limi.tvdesktop
 import android.os.Build
 import android.os.Bundle
 import android.content.Context
+import android.content.pm.ActivityInfo
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.view.View
@@ -75,15 +76,25 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.min
+import com.limi.tvdesktop.plugins.PluginCrashGuard
+import com.limi.tvdesktop.plugins.PluginManager
+import com.limi.tvdesktop.plugins.runtime.PluginSurfaceHost
+import com.limi.tvdesktop.plugins.runtime.PluginSurfaceRegistry
+import com.limi.tvdesktop.plugins.runtime.PluginSlotHost
 
 class MainActivity : ComponentActivity() {
+    private var pluginSafeModeWindowUntil = 0L
     @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val pluginCrashGuard = PluginCrashGuard(this)
+        pluginCrashGuard.beginStartup()
+        pluginSafeModeWindowUntil = android.os.SystemClock.uptimeMillis() + 15_000L
         RenderPerformance.init(this)
         AccountManager.init(this)
         PosterCacheManager.init(this)
         MediaLibraryManager.init(this)
+        applyOrientationPreference()
         if (AccountManager.syncOnLaunch.value) MediaLibraryManager.refresh()
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).apply {
@@ -95,11 +106,21 @@ class MainActivity : ComponentActivity() {
             View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
             View.SYSTEM_UI_FLAG_LAYOUT_STABLE
         setContent { MaterialTheme(colorScheme = darkColorScheme()) { AppEntranceHost { TvDesktop() } } }
+        window.decorView.postDelayed({ pluginCrashGuard.markStable() }, 8_000)
     }
 
     override fun onStart() {
         super.onStart()
+        applyOrientationPreference()
         DeveloperDiagnostics.attach(this)
+    }
+
+    private fun applyOrientationPreference() {
+        requestedOrientation = if (DesktopPreferences.ForceLandscape.isEnabled(this)) {
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
     }
 
     override fun onStop() {
@@ -110,6 +131,17 @@ class MainActivity : ComponentActivity() {
     // Activity key dispatch is required for TV remotes even when Compose has no focused node.
     @android.annotation.SuppressLint("RestrictedApi")
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (event.keyCode == android.view.KeyEvent.KEYCODE_BACK &&
+            event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount > 0 &&
+            android.os.SystemClock.uptimeMillis() <= pluginSafeModeWindowUntil
+        ) {
+            PluginManager.get(this).installed()
+                .filter { it.trust != com.limi.tvdesktop.plugins.PluginTrust.OFFICIAL && it.enabled }
+                .forEach { PluginManager.get(this).setEnabled(it.id, false) }
+            android.widget.Toast.makeText(this, "已进入安全模式：第三方插件已停用", android.widget.Toast.LENGTH_LONG).show()
+            recreate()
+            return true
+        }
         DeveloperDiagnostics.recordKey(event)
         if (ScreenSaverState.isActive) {
             if (event.action == android.view.KeyEvent.ACTION_UP) {
@@ -179,6 +211,7 @@ fun TvDesktop() {
     var page by rememberSaveable { mutableStateOf(DesktopPreferences.LastTab.get(context).let { if (it == "应用") "媒体库" else it }) }
     var settings by rememberSaveable { mutableStateOf(false) }
     var settingsPage by rememberSaveable { mutableStateOf(false) }
+    var forceNativeSettings by rememberSaveable { mutableStateOf(false) }
     var wallpaperVersion by remember { mutableIntStateOf(0) }
     var selected by remember { mutableStateOf<DemoMedia?>(null) }
     var posterWallCategory by remember { mutableStateOf<MediaCategoryInfo?>(null) }
@@ -344,8 +377,9 @@ fun TvDesktop() {
         }
     }
     var legacyBlur by remember { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(artwork, banner, page, wallpaperMode, fixedWallpaper, RenderPerformance.staticBlur) {
-        legacyBlur = if (RenderPerformance.staticBlur) withContext(Dispatchers.Default) {
+    val cachedHomeBlur = page == "首页" && wallpaperMode != WallpaperMode.VIDEO
+    LaunchedEffect(artwork, banner, page, wallpaperMode, fixedWallpaper, RenderPerformance.staticBlur, cachedHomeBlur) {
+        legacyBlur = if (RenderPerformance.staticBlur || cachedHomeBlur) withContext(Dispatchers.Default) {
             when {
                 page == "媒体库" -> {
                     val backdropUrl = banner.realItem?.backdropUrl.orEmpty()
@@ -532,26 +566,28 @@ fun TvDesktop() {
                                 VideoWallpaperSurface(videoUri, Modifier.fillMaxSize())
                             wallpaperMode != WallpaperMode.FOLLOW_CONTENT && fixedWallpaper != null ->
                                 Image(fixedWallpaper, null, Modifier.fillMaxSize()
-                                    .then(if (RenderPerformance.blur31) Modifier.hazeSource(wallpaperHaze) else Modifier),
+                                    .then(if (RenderPerformance.blur31 && !cachedHomeBlur) Modifier.hazeSource(wallpaperHaze) else Modifier),
                                     contentScale = ContentScale.Crop)
                             wallpaperMode == WallpaperMode.FOLLOW_CONTENT ->
-                                FollowContentWallpaper(banner, artwork, wallpaperHaze)
+                                FollowContentWallpaper(banner, artwork, wallpaperHaze, enableHaze = !cachedHomeBlur)
                             else ->
                                 Image(artwork.background.asImageBitmap(), null, Modifier.fillMaxSize()
-                                    .then(if (RenderPerformance.blur31) Modifier.hazeSource(wallpaperHaze) else Modifier),
+                                    .then(if (RenderPerformance.blur31 && !cachedHomeBlur) Modifier.hazeSource(wallpaperHaze) else Modifier),
                                     contentScale = ContentScale.Crop)
                         }
                     }
-                    if (RenderPerformance.blur31) {
+                    if (RenderPerformance.blur31 && !cachedHomeBlur) {
                         Box(Modifier.fillMaxSize().hazeEffect(wallpaperHaze) {
                             blurEnabled = currentBlurProgress() > 0f
                             blurRadius = ((if (page == "首页") appListBlur else 50f) * currentBlurProgress()).coerceAtLeast(.01f).dp
                             backgroundColor = Color.Transparent
                             tints = emptyList()
                             noiseFactor = 0f
-                            inputScale = HazeInputScale.Fixed(.5f)
+                            // Blur radius and motion remain unchanged; a smaller intermediate
+                            // surface removes millions of texture samples per animation frame.
+                            inputScale = HazeInputScale.Fixed(.35f)
                         })
-                    } else if (RenderPerformance.staticBlur && legacyBlur != null) {
+                    } else if ((RenderPerformance.staticBlur || cachedHomeBlur) && legacyBlur != null) {
                         Image(legacyBlur!!, null, Modifier.fillMaxSize().graphicsLayer {
                             alpha = currentBlurProgress() * (if (page == "首页") (appListBlur / 50f).coerceIn(0f, 1f) else 1f)
                         }, contentScale = ContentScale.Crop)
@@ -564,7 +600,7 @@ fun TvDesktop() {
                                 Box(Modifier.fillMaxWidth().height(941.dp)) {
                                     Text(if (banner.title == "海岸线之外") "更大的世界\n在海岸线之外" else "", Modifier.offset(1440.dp, 181.dp).graphicsLayer { rotationZ = -9f },
                                         color = Color(0xFF808080), fontSize = 26.sp, lineHeight = 38.sp,
-                                        fontFamily = FontFamily(Font(R.font.ma_shan_zheng)), letterSpacing = 3.sp)
+                                        fontFamily = FontFamily.Default, letterSpacing = 3.sp)
                                     Column(Modifier.offset(LibraryDesign.pageInset, 188.dp)) {
                                         if (AccountManager.displayMode.value == LibraryDisplayMode.ISOLATED && AccountManager.accounts.isNotEmpty()) {
                                             val curAcc = AccountManager.accounts.find { it.id == AccountManager.selectedAccountId.value } ?: AccountManager.accounts.first()
@@ -603,7 +639,7 @@ fun TvDesktop() {
                                                     color = White,
                                                     fontSize = if (isDemoCalligraphy) 90.sp else 64.sp,
                                                     lineHeight = if (isDemoCalligraphy) 120.sp else 80.sp,
-                                                    fontFamily = if (isDemoCalligraphy) FontFamily(Font(R.font.ma_shan_zheng)) else FontFamily.Default,
+                                                    fontFamily = FontFamily.Default,
                                                     fontWeight = if (isDemoCalligraphy) FontWeight.Normal else FontWeight.Bold,
                                                     letterSpacing = if (isDemoCalligraphy) 3.sp else 1.sp,
                                                     maxLines = 2,
@@ -779,9 +815,17 @@ fun TvDesktop() {
                             }
                         }
                     } else if (page == "首页") {
-                        HomePage(wallpaperHaze, artwork, legacyBlur, homeDock, homeNav,
-                            onExpandProgress = { homeExpandProgress = it },
-                            registerReturnToTop = { homeReturnToTop = it })
+                        val homeOwner = PluginSurfaceRegistry.owner("home", PluginManager.get(context).installed())
+                        if (homeOwner != null) {
+                            PluginSurfaceHost(homeOwner, "home")
+                        } else {
+                            Box(Modifier.fillMaxSize()) {
+                                HomePage(wallpaperHaze, artwork, legacyBlur, homeDock, homeNav,
+                                    onExpandProgress = { homeExpandProgress = it },
+                                    registerReturnToTop = { homeReturnToTop = it })
+                                PluginSlotHost("home.quickActions", Modifier.align(Alignment.TopEnd).padding(top = 132.dp, end = 52.dp).width(420.dp).heightIn(max = 300.dp))
+                            }
+                        }
                     } else {
                         Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(page, Modifier.staggeredEntrance(0), color = White, fontSize = 54.sp, fontWeight = FontWeight.Light)
@@ -841,7 +885,28 @@ fun TvDesktop() {
                     settings = false
                     settingsPage = true
                 }, onClose = { settings = false })
-                if (settingsPage) SettingsPage(haze = haze, staticBlur = legacyBlur, onClose = { settingsPage = false }, onWallpaperChanged = { wallpaperVersion++ })
+                if (settingsPage) {
+                    val settingsOwner = PluginSurfaceRegistry.owner("settings", PluginManager.get(context).installed())
+                    if (settingsOwner != null && !forceNativeSettings) {
+                        BackHandler { forceNativeSettings = true }
+                        Box(Modifier.fillMaxSize().zIndex(200f).background(Color(0xFA090B10))) {
+                            PluginSurfaceHost(settingsOwner, "settings")
+                            Text(
+                                "原生设置",
+                                color = White,
+                                fontSize = 17.sp,
+                                modifier = Modifier.align(Alignment.TopEnd).padding(28.dp)
+                                    .background(Color(0x663A3D45), RoundedCornerShape(12.dp))
+                                    .clickable { forceNativeSettings = true }.padding(horizontal = 18.dp, vertical = 10.dp),
+                            )
+                        }
+                    } else {
+                        SettingsPage(haze = haze, staticBlur = legacyBlur, onClose = {
+                            settingsPage = false
+                            forceNativeSettings = false
+                        }, onWallpaperChanged = { wallpaperVersion++ })
+                    }
+                }
                 val media = playingMedia
                 val info = playingInfo
                 if (media != null && info != null) {
@@ -870,6 +935,10 @@ fun TvDesktop() {
                         onClose = {
                             playingMedia = null
                         }
+                    )
+                    PluginSlotHost(
+                        "player.overlay",
+                        Modifier.fillMaxSize().zIndex(310f).padding(start = 48.dp, top = 48.dp, end = 48.dp, bottom = 140.dp),
                     )
                 } else if (media != null) {
                     Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
@@ -1112,9 +1181,14 @@ internal fun formatMediaProgressText(media: DemoMedia): String {
 
 @OptIn(ExperimentalHazeApi::class)
 @Composable
-private fun FollowContentWallpaper(banner: DemoMedia, artwork: DemoArtwork, wallpaperHaze: HazeState) {
+private fun FollowContentWallpaper(
+    banner: DemoMedia,
+    artwork: DemoArtwork,
+    wallpaperHaze: HazeState,
+    enableHaze: Boolean = true
+) {
     Crossfade(banner, Modifier.fillMaxSize()
-        .then(if (RenderPerformance.blur33) Modifier.hazeSource(wallpaperHaze) else Modifier),
+        .then(if (enableHaze && RenderPerformance.blur33) Modifier.hazeSource(wallpaperHaze) else Modifier),
         animationSpec = tween(if (RenderPerformance.reducedEffects) 100 else 260), label = "banner-background") { media ->
         val realBackdrop = media.realItem?.backdropUrl
         val remoteBmp = if (!realBackdrop.isNullOrBlank()) rememberPosterImage(realBackdrop) else null

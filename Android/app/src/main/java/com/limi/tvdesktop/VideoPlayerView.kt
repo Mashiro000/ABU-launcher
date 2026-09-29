@@ -55,6 +55,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import com.limi.tvdesktop.plugins.MpvPluginRuntime
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
@@ -95,9 +96,14 @@ fun VideoPlayerScreen(
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
-    var activeEngine by remember {
+    val mediaRoutingKey = playbackInfo?.mediaId?.takeIf { it.isNotBlank() } ?: streamUrl
+    var activeEngine by remember(mediaRoutingKey) {
+        val configured = DesktopPreferences.PlaybackEngine.current(context)
+        val remembered = PlayerEngineHistory.preferred(context, mediaRoutingKey)
         mutableStateOf(
-            if (DesktopPreferences.PlaybackEngine.current(context) == DesktopPreferences.PlaybackEngine.MPV)
+            if (MpvPluginRuntime.isEnabled(context) &&
+                (configured == DesktopPreferences.PlaybackEngine.MPV ||
+                    configured == DesktopPreferences.PlaybackEngine.AUTO && remembered == PlayerEngineHistory.Engine.MPV))
                 DesktopPreferences.PlaybackEngine.MPV else DesktopPreferences.PlaybackEngine.INTERNAL
         )
     }
@@ -129,6 +135,8 @@ fun VideoPlayerScreen(
     var isBuffering by remember { mutableStateOf(true) }
     var bufferingSince by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var networkSpeedText by remember { mutableStateOf("0 KB/s") }
+    var hasVideoTrack by remember { mutableStateOf(false) }
+    var engineSuccessRecorded by remember(activeEngine, mediaRoutingKey) { mutableStateOf(false) }
 
     val coroutineScope = rememberCoroutineScope()
     var speedOverlayText by remember { mutableStateOf<String?>(null) }
@@ -186,12 +194,21 @@ fun VideoPlayerScreen(
         }
         target
     }
+    val healthMonitor = remember(activePlayUrl, useMpv) { PlaybackHealthMonitor() }
 
     LaunchedEffect(activePlayUrl) {
         if (activePlayUrl.isBlank()) errorMessage = "该条目没有可用的播放地址"
     }
 
-    val mpvController = remember(useMpv) { if (useMpv) EmbeddedMpvController(context) else null }
+    val mpvController = remember(useMpv) {
+        if (useMpv) runCatching { EmbeddedMpvController(context) }.getOrNull() else null
+    }
+    LaunchedEffect(useMpv, mpvController) {
+        if (useMpv && mpvController == null) {
+            activeEngine = DesktopPreferences.PlaybackEngine.INTERNAL
+            errorMessage = "尚未安装可用的 MPV 插件，请先在设置 → 插件中安装"
+        }
+    }
     DisposableEffect(mpvController) {
         onDispose { mpvController?.destroy() }
     }
@@ -285,10 +302,19 @@ fun VideoPlayerScreen(
                 }
             }
 
+            override fun onRenderedFirstFrame() {
+                healthMonitor.onFirstFrame()
+                if (!engineSuccessRecorded) {
+                    PlayerEngineHistory.recordSuccess(context, mediaRoutingKey, PlayerEngineHistory.Engine.MEDIA3)
+                    engineSuccessRecorded = true
+                }
+            }
+
             override fun onTracksChanged(tracks: Tracks) {
                 Log.i(TAG, "onTracksChanged: groups = ${tracks.groups.size}")
                 val audios = mutableListOf<TvAudioTrack>()
                 val subtitles = mutableListOf<TvSubtitleTrack>()
+                hasVideoTrack = tracks.groups.any { it.type == C.TRACK_TYPE_VIDEO }
 
                 tracks.groups.forEachIndexed { groupIdx, group ->
                     for (trackIdx in 0 until group.length) {
@@ -361,9 +387,10 @@ fun VideoPlayerScreen(
                 Log.e(TAG, "播放失败，已停止（不切换演示视频）")
                 val decoderFailed = error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED ||
                     error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_INIT_FAILED
-                if (decoderFailed && !isFallbackTried) {
+                if (decoderFailed && !isFallbackTried && MpvPluginRuntime.isEnabled(context)) {
                     isFallbackTried = true
-                    errorMessage = "内置解码器不支持该视频，正在切换到内嵌 mpv…"
+                    PlayerEngineHistory.recordFailure(context, mediaRoutingKey, PlayerEngineHistory.Engine.MEDIA3)
+                    errorMessage = "内置解码器不支持该视频，正在切换到 MPV 插件…"
                     coroutineScope.launch {
                         delay(350)
                         currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
@@ -388,7 +415,7 @@ fun VideoPlayerScreen(
 
 
     // 实时位置与缓冲轮询 (250ms 刷新)
-    LaunchedEffect(Unit) {
+    LaunchedEffect(useMpv, activePlayUrl) {
         while (true) {
             currentPosition = enginePosition().coerceAtLeast(0L)
             bufferedPosition = if (useMpv) currentPosition + (mpvController?.cacheDurationMs ?: 0L)
@@ -397,6 +424,37 @@ fun VideoPlayerScreen(
                 duration = engineDuration()
             }
             if (useMpv) isPlaying = engineIsPlaying()
+            if (useMpv && currentPosition >= 1_000L && !engineSuccessRecorded) {
+                PlayerEngineHistory.recordSuccess(context, mediaRoutingKey, PlayerEngineHistory.Engine.MPV)
+                engineSuccessRecorded = true
+            } else if (!useMpv && !isFallbackTried) {
+                when (healthMonitor.sample(
+                    positionMs = currentPosition,
+                    bufferedPositionMs = bufferedPosition,
+                    isBuffering = isBuffering,
+                    hasVideo = hasVideoTrack,
+                )) {
+                    PlaybackHealthMonitor.Decision.RETRY_MEDIA3 -> {
+                        Log.w(TAG, "播放健康评分请求重试 Media3")
+                        exoPlayer.prepare()
+                        exoPlayer.play()
+                    }
+                    PlaybackHealthMonitor.Decision.SWITCH_ENGINE -> {
+                        if (MpvPluginRuntime.isEnabled(context)) {
+                            Log.w(TAG, "播放健康评分判定 Media3 异常，切换 MPV")
+                            isFallbackTried = true
+                            PlayerEngineHistory.recordFailure(context, mediaRoutingKey, PlayerEngineHistory.Engine.MEDIA3)
+                            exoPlayer.pause()
+                            activeEngine = DesktopPreferences.PlaybackEngine.MPV
+                            errorMessage = null
+                        }
+                    }
+                    PlaybackHealthMonitor.Decision.WAITING_FOR_NETWORK -> {
+                        // Buffer is empty: this is a slow network, not a decoder failure.
+                    }
+                    PlaybackHealthMonitor.Decision.HEALTHY -> Unit
+                }
+            }
             delay(250)
         }
     }
@@ -1205,11 +1263,13 @@ fun VideoPlayerScreen(
                         text = if (useMpv) "已使用 mpv 内核" else "切换到 mpv 内核",
                         hazeState = playerHaze,
                         onClick = {
-                            if (!useMpv) {
+                            if (!useMpv && MpvPluginRuntime.isEnabled(context)) {
                                 currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
                                 exoPlayer.pause()
                                 activeEngine = DesktopPreferences.PlaybackEngine.MPV
                                 errorMessage = null
+                            } else if (!MpvPluginRuntime.isEnabled(context)) {
+                                errorMessage = "MPV 插件尚未安装或启用，请前往设置 → 插件"
                             }
                         }
                     )

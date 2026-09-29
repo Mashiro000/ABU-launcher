@@ -4,10 +4,14 @@ import android.content.Context
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import dev.jdtech.mpv.MPVLib
+import com.limi.tvdesktop.plugins.MpvPluginRuntime
 
 /** Thin libmpv adapter. UI and input remain owned by the app. */
 class EmbeddedMpvController(context: Context) {
-    private val mpv = requireNotNull(MPVLib.create(context.applicationContext)) { "无法创建 libmpv 实例" }
+    private val mpv = run {
+        MpvPluginRuntime.ensureLoaded(context.applicationContext)
+        requireNotNull(MPVLib.create(context.applicationContext)) { "无法创建 libmpv 实例" }
+    }
     private var loadedUrl: String? = null
     private var pendingPositionMs = 0L
     private var surfaceAttached = false

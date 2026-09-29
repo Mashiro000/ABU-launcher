@@ -17,6 +17,10 @@ build/
 # Local APK exports
 release_apk/
 *.apk
+*.abu-plugin
+dist/
+.release-secrets/
+official-plugin-repository/
 
 # Android logs and test artifacts
 Android/*.txt

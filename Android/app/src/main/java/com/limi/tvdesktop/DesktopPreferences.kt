@@ -186,7 +186,20 @@ object DesktopPreferences {
         }
     }
 
-    // 7. 记住上次停留页面
+    /** Keep the desktop usable when sideloaded on a phone whose current orientation is portrait. */
+    object ForceLandscape {
+        fun isEnabled(context: Context): Boolean =
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getBoolean("forceLandscape", true)
+
+        fun setEnabled(context: Context, enabled: Boolean) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putBoolean("forceLandscape", enabled).apply()
+            version++
+        }
+    }
+
+    // 8. 记住上次停留页面
     object LastTab {
         fun get(context: Context): String =
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("lastTab", "媒体库") ?: "媒体库"

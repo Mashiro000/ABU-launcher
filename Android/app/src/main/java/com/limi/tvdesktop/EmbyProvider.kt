@@ -364,7 +364,71 @@ class EmbyProvider(override var account: MediaAccount) : MediaSourceProvider {
     }
 
     override suspend fun getStreamUrl(itemId: String): String {
-        return "$baseUrl/Videos/$itemId/stream.mp4?static=true&api_key=${account.token}"
+        val policy = AccountManager.embyPlaybackPolicy.value
+        if (policy == AccountManager.EmbyPlaybackPolicy.PREFER_DIRECT) {
+            return "$baseUrl/Videos/$itemId/stream?static=true&api_key=${account.token}"
+        }
+        return requestPlaybackUrl(itemId, policy)
+            ?: "$baseUrl/Videos/$itemId/stream?static=true&api_key=${account.token}"
+    }
+
+    private suspend fun requestPlaybackUrl(
+        itemId: String,
+        policy: AccountManager.EmbyPlaybackPolicy,
+    ): String? = withContext(Dispatchers.IO) {
+        runCatching {
+            val allowTranscoding = policy != AccountManager.EmbyPlaybackPolicy.NO_TRANSCODE
+            val preferTranscoding = policy == AccountManager.EmbyPlaybackPolicy.PREFER_TRANSCODE
+            val profile = JSONObject().apply {
+                put("MaxStreamingBitrate", 120_000_000)
+                put("MaxStaticBitrate", 120_000_000)
+                put("MusicStreamingTranscodingBitrate", 384_000)
+                put("DirectPlayProfiles", JSONArray().apply {
+                    put(JSONObject().put("Type", "Video").put("Container", "mp4,mkv,webm,mpegts,ts,m2ts,avi,mov"))
+                    put(JSONObject().put("Type", "Audio").put("Container", "mp3,aac,m4a,flac,ogg,opus,wav"))
+                })
+                put("TranscodingProfiles", JSONArray().apply {
+                    put(JSONObject().put("Type", "Video").put("Protocol", "hls")
+                        .put("Container", "ts").put("VideoCodec", "h264").put("AudioCodec", "aac")
+                        .put("Context", "Streaming"))
+                })
+            }
+            val body = JSONObject().apply {
+                put("UserId", account.userId)
+                put("DeviceProfile", profile)
+                put("EnableDirectPlay", !preferTranscoding)
+                put("EnableDirectStream", !preferTranscoding)
+                put("EnableTranscoding", allowTranscoding)
+                put("AllowVideoStreamCopy", !preferTranscoding)
+                put("AllowAudioStreamCopy", !preferTranscoding)
+            }
+            val url = "$baseUrl/Items/$itemId/PlaybackInfo?UserId=${account.userId}&IsPlayback=true&AutoOpenLiveStream=true"
+            client.newCall(request(url, "POST", body.toString().toRequestBody("application/json".toMediaType())))
+                .execute().use { response ->
+                    require(response.isSuccessful) { "PlaybackInfo HTTP ${response.code}" }
+                    val result = JSONObject(response.body?.string().orEmpty())
+                    val source = result.optJSONArray("MediaSources")?.optJSONObject(0) ?: return@use null
+                    val relative = when {
+                        preferTranscoding -> source.optString("TranscodingUrl")
+                        source.optBoolean("SupportsDirectPlay") ->
+                            "/Videos/$itemId/stream?static=true&MediaSourceId=${source.optString("Id")}"
+                        source.optString("DirectStreamUrl").isNotBlank() -> source.optString("DirectStreamUrl")
+                        allowTranscoding -> source.optString("TranscodingUrl")
+                        else -> ""
+                    }
+                    if (relative.isBlank()) null else absolutePlaybackUrl(relative)
+                }
+        }.getOrNull()
+    }
+
+    private fun absolutePlaybackUrl(url: String): String {
+        val absolute = if (url.startsWith("http://") || url.startsWith("https://")) url
+        else baseUrl + "/" + url.trimStart('/')
+        return absolute + when {
+            absolute.contains("api_key=") -> ""
+            absolute.contains('?') -> "&api_key=${account.token}"
+            else -> "?api_key=${account.token}"
+        }
     }
 
     override suspend fun reportPlaybackProgress(itemId: String, positionMs: Long, isPlaying: Boolean) {

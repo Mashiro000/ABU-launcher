@@ -32,7 +32,11 @@
   - **Android 9 ~ 12 (API 28~32)**：后台线程降采样高斯模糊平滑降级，确保高中低端电视芯片均能稳定满帧运行。
 - 🎬 **本地与远程媒体库支持**：
   - 支持 WebDAV / Alist / Emby / Plex 多源接入与海报墙展示。
-  - 集成高性能 MPV 视频播放核心与 ExoPlayer 双引擎架构。
+  - 主程序默认使用 Android Media3 与系统硬件解码；MPV 作为可按需安装的官方插件，不再增大主安装包。
+- 🧩 **模块化插件平台**：
+  - 内置官方插件仓库，可按当前设备 ABI 一键下载、验签、安装、启停和回滚插件。
+  - 支持第三方 HTTPS 仓库、本地 `.abu-plugin` 导入、细粒度权限确认和风险提示。
+  - 插件可声明设置页、首页、播放器悬浮层及完整页面，并通过受控能力桥访问宿主功能。
 - 📺 **全输入形态交互适配**：
   - 完美适配电视遥控器方向键（D-Pad）、确认（Enter/DPad Center）及返回（Back）。
   - 兼容鼠标悬浮、滚轮操作与触控交互，支持标准 Android 手机、平板或车载屏幕。
@@ -62,7 +66,8 @@
   - Material 3 (1.4.0)
   - Activity Compose 1.12.2
 - **毛玻璃效果**：Dev Chrisbanes Haze 1.7.2
-- **视频引擎**：libmpv 1.0.0 & AndroidX Media3 ExoPlayer 1.4.1
+- **视频引擎**：AndroidX Media3 ExoPlayer 1.4.1（默认）与可选 MPV 插件
+- **插件脚本沙箱**：QuickJS；Ed25519 签名校验；独立 Android Service 隔离执行
 
 ---
 
@@ -78,7 +83,11 @@
 │   ├── qa/                     # 验证文档与测试用例
 │   ├── build.gradle.kts        # 工程级构建脚本
 │   └── settings.gradle.kts     # 模块设置
+├── plugin-sdk/                 # 第三方插件 TypeScript SDK、示例与打包工具
+├── tools/                      # 官方 MPV 插件构建工具
+├── docs/                       # 插件架构与开发文档
 ├── LICENSE                     # MIT 开源许可证
+├── CHANGELOG.md                # 版本更新记录
 └── README.md                   # 项目说明文档
 ```
 
@@ -104,9 +113,9 @@ cd Android
 ./gradlew.bat assembleRelease
 ```
 
-编译成功后，APK 产物位于：
+编译成功后会同时生成 `arm64-v8a`、`armeabi-v7a`、`x86_64` 与通用 APK，产物位于：
 - **Debug 版**：`Android/app/build/outputs/apk/debug/app-debug.apk`
-- **Release 版**：`Android/app/build/outputs/apk/release/app-release.apk`
+- **Release 版**：`Android/app/build/outputs/apk/release/`
 
 ### 安装到电视或模拟器
 

@@ -149,7 +149,7 @@ fun MediaLibrarySettings(
         Spacer(Modifier.height(32.dp))
 
         SettingsSectionTitle("播放与服务器兼容")
-        LibraryPreferenceRow("Emby / Jellyfin 优先直接播放", "关闭后允许服务器生成兼容码流；开启可减少服务器转码", AccountManager.preferDirectPlay.value, AccountManager::setPreferDirectPlay)
+        EmbyPlaybackPolicyRow()
         Spacer(Modifier.height(10.dp))
         LibraryPreferenceRow("允许局域网 HTTP 服务器", "关闭后新增服务器必须使用 HTTPS 地址", AccountManager.allowInsecureConnections.value, AccountManager::setAllowInsecureConnections)
 
@@ -337,6 +337,31 @@ private fun LibraryPreferenceRow(
                 .background(if (enabled) Color(0xFF3875F6) else Color(0xFF4B5563)).padding(4.dp),
             contentAlignment = if (enabled) Alignment.CenterEnd else Alignment.CenterStart
         ) { Box(Modifier.size(24.dp).clip(CircleShape).background(Color.White)) }
+    }
+}
+
+@Composable
+private fun EmbyPlaybackPolicyRow() {
+    val policy = AccountManager.embyPlaybackPolicy.value
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    Row(
+        modifier = Modifier.fillMaxWidth().clip(ContinuousCornerShape(16.dp))
+            .background(if (focused) Color.White else Color(0x14FFFFFF))
+            .border(1.5.dp, if (focused) Color.White else Color(0x22FFFFFF), ContinuousCornerShape(16.dp))
+            .clickable(interactionSource = interaction, indication = null) {
+                val values = AccountManager.EmbyPlaybackPolicy.entries
+                AccountManager.setEmbyPlaybackPolicy(values[(policy.ordinal + 1) % values.size])
+            }
+            .focusable(interactionSource = interaction)
+            .padding(horizontal = 22.dp, vertical = 17.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("Emby / Jellyfin 播放策略", color = if (focused) Color.Black else White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Text(policy.description, color = if (focused) Color(0xFF5A606D) else Color(0xFF9EA3AE), fontSize = 14.sp)
+        }
+        Text(policy.label, color = if (focused) Color(0xFF245FD2) else Color(0xFF8FB4FF), fontSize = 15.sp, fontWeight = FontWeight.Bold)
     }
 }
 

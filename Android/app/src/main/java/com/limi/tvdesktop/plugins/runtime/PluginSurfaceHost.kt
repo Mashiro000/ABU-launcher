@@ -1,0 +1,82 @@
+package com.limi.tvdesktop.plugins.runtime
+
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.limi.tvdesktop.plugins.InstalledPlugin
+import com.limi.tvdesktop.plugins.PluginManager
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.flow.filter
+import org.json.JSONObject
+
+@Composable
+fun PluginSurfaceHost(plugin: InstalledPlugin, surface: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val manager = remember { PluginManager.get(context) }
+    val client = remember { PluginSandboxClient(context) }
+    val bridge = remember { PluginCapabilityBridge(context) }
+    val session = remember(plugin.id, plugin.version) { PluginRuntimeSession(plugin, manager, client, bridge) }
+    val scope = rememberCoroutineScope()
+    var node by remember(plugin.id) { mutableStateOf<PluginUiNode?>(null) }
+    var error by remember(plugin.id) { mutableStateOf<String?>(null) }
+    var consent by remember { mutableStateOf<Pair<PluginConsentRequest, CompletableDeferred<Boolean>>?>(null) }
+    DisposableEffect(client) { onDispose(client::close) }
+
+    suspend fun invoke(method: String, input: JSONObject) {
+        runCatching {
+            session.invoke(method, input) { request ->
+                val answer = CompletableDeferred<Boolean>()
+                consent = request to answer
+                answer.await().also { consent = null }
+            }
+        }.fold(
+            onSuccess = { node = it; error = null },
+            onFailure = { error = "插件运行失败：${it.message}" },
+        )
+    }
+
+    LaunchedEffect(plugin.id, plugin.version, surface) {
+        invoke("render", JSONObject().put("surface", surface))
+    }
+    LaunchedEffect(plugin.id, plugin.version) {
+        PluginEventBus.events.filter { it.sourcePluginId != plugin.id }.collect { event ->
+            invoke("onEvent", JSONObject().put("sourcePluginId", event.sourcePluginId).put("topic", event.topic).put("payload", event.payload))
+        }
+    }
+    Box(modifier.fillMaxSize().padding(42.dp), contentAlignment = Alignment.Center) {
+        when {
+            node != null -> PluginUiRenderer(node!!, onAction = { action ->
+                scope.launch { invoke("onAction", JSONObject().put("surface", surface).put("action", action)) }
+            }, modifier = Modifier.fillMaxSize())
+            error != null -> Text(error!!, color = Color(0xFFFF8A80), fontSize = 20.sp)
+            else -> Text("正在加载 ${plugin.name}…", color = Color(0xFFA5ACB8), fontSize = 20.sp)
+        }
+    }
+    consent?.let { (request, answer) ->
+        AlertDialog(
+            onDismissRequest = { if (!answer.isCompleted) answer.complete(false) },
+            title = { Text("插件请求权限") },
+            text = { Text("${plugin.name} 请求“${request.title}”${if (request.sensitive) "。这是敏感权限，仅在你信任此插件时允许。" else "。"}") },
+            confirmButton = { TextButton(onClick = { if (!answer.isCompleted) answer.complete(true) }) { Text("允许") } },
+            dismissButton = { TextButton(onClick = { if (!answer.isCompleted) answer.complete(false) }) { Text("拒绝") } },
+        )
+    }
+}

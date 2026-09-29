@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.hello",
+  "name": "Hello ABU",
+  "version": "1.0.0",
+  "author": "ABU SDK Example",
+  "description": "声明式页面、按钮事件和设备能力示例",
+  "kind": "ui",
+  "entry": "dist/index.js",
+  "surfaces": ["home"],
+  "slots": ["home.quickActions"],
+  "permissions": []
+}

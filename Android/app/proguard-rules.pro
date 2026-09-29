@@ -31,3 +31,7 @@
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
 -dontwarn javax.annotation.**
+
+# 5) net.i2p Ed25519 contains an optional desktop-JDK compatibility branch. Android uses
+#    EdDSAPublicKey directly and never loads the sun.security.x509 type.
+-dontwarn sun.security.x509.X509Key

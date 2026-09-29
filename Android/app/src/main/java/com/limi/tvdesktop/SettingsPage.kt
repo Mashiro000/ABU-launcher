@@ -84,6 +84,12 @@ internal enum class SettingsCategory(
         "❖",
         listOf(Color(0xFF22C55E), Color(0xFF15803D))
     ),
+    PLUGINS(
+        "插件",
+        "内核、界面扩展与能力权限",
+        "⬡",
+        listOf(Color(0xFF8B5CF6), Color(0xFF6D28D9))
+    ),
     GENERAL(
         "通用与系统",
         "桌面默认、网络、存储与关于",
@@ -123,7 +129,13 @@ private fun itemsFor(category: SettingsCategory, context: Context): List<Pair<St
         "海报画质与加载" to AccountManager.posterQuality.value.displayName,
         "未绑定时体验演示" to if (AccountManager.showDemoWhenEmpty.value) "已开启" else "已隐藏"
     )
+    SettingsCategory.PLUGINS -> listOf(
+        "插件管理" to "安装、启停、更新与插件专属设置",
+        "插件仓库" to "官方仓库与第三方仓库",
+        "安全与权限" to "敏感能力授权、签名与安全模式"
+    )
     SettingsCategory.GENERAL -> listOf(
+        "强制横屏" to if (DesktopPreferences.ForceLandscape.isEnabled(context)) "已开启 · 手机安装时始终保持横屏" else "已关闭 · 跟随系统方向",
         "设置默认桌面" to "阿布桌面",
         "网络连接状态" to "Wi-Fi 已连接",
         "系统语言" to "简体中文",
@@ -169,12 +181,8 @@ internal fun SettingsPage(
     }
 
     // Multilevel back-press handler for TV remote
-    BackHandler {
+    BackHandler(enabled = detail == null) {
         when {
-            detail != null -> {
-                detail = null
-                leftRequesters[category]?.requestFocus()
-            }
             focusInRightSide -> {
                 leftRequesters[category]?.requestFocus()
             }
@@ -206,12 +214,9 @@ internal fun SettingsPage(
             )
             .onPreviewKeyEvent {
                 if (it.key == Key.Escape || it.key == Key.Back) {
+                    if (detail != null) return@onPreviewKeyEvent false
                     if (it.type == KeyEventType.KeyDown) {
                         when {
-                            detail != null -> {
-                                detail = null
-                                leftRequesters[category]?.requestFocus()
-                            }
                             focusInRightSide -> {
                                 leftRequesters[category]?.requestFocus()
                             }
@@ -330,6 +335,10 @@ internal fun SettingsPage(
                         onChanged = ::notifyDesktopChanged,
                         returnRequester = leftRequesters[category]
                     )
+                    "plugins" -> PluginSettingsPage(
+                        onBack = { detail = null; leftRequesters[category]?.requestFocus() },
+                        returnRequester = leftRequesters[category]
+                    )
                     else -> CategoryItems(
                         category = category,
                         refreshKey = refreshTick,
@@ -346,6 +355,7 @@ internal fun SettingsPage(
                         onScreenSaver = { detail = "screensaver" },
                         onMediaLibrary = { detail = "media_library" },
                         onPlaybackEngine = { detail = "playback_engine" },
+                        onPlugins = { detail = "plugins" },
                         onToggleLowPerformance = {
                             if (DeveloperDiagnostics.remaining > 0) DeveloperDiagnostics.finish("渲染模式改变，测试提前结束")
                             RenderPerformance.setEnabled(context, !RenderPerformance.lowPerformance)
@@ -359,6 +369,16 @@ internal fun SettingsPage(
                             val cur = DesktopPreferences.AutoStart.isEnabled(context)
                             DesktopPreferences.AutoStart.setEnabled(context, !cur)
                             notifyDesktopChanged()
+                        },
+                        onToggleForceLandscape = {
+                            val enabled = !DesktopPreferences.ForceLandscape.isEnabled(context)
+                            DesktopPreferences.ForceLandscape.setEnabled(context, enabled)
+                            (context as? android.app.Activity)?.requestedOrientation = if (enabled) {
+                                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                            } else {
+                                android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                            }
+                            refreshTick++
                         },
                         onDefaultHome = { openDefaultHomeSettings(context) }
                     )
@@ -536,9 +556,11 @@ private fun CategoryItems(
     onScreenSaver: () -> Unit,
     onMediaLibrary: () -> Unit,
     onPlaybackEngine: () -> Unit,
+    onPlugins: () -> Unit,
     onToggleLowPerformance: () -> Unit,
     onToggleStaticBlur: () -> Unit,
     onToggleAutoStart: () -> Unit,
+    onToggleForceLandscape: () -> Unit,
     onDefaultHome: () -> Unit
 ) {
     val context = LocalContext.current
@@ -574,8 +596,10 @@ private fun CategoryItems(
                 label == "网格密度" -> onGridDensity
                 label == "屏幕保护" -> onScreenSaver
                 label == "默认播放器" -> onPlaybackEngine
+                category == SettingsCategory.PLUGINS -> onPlugins
                 category == SettingsCategory.LIBRARY -> onMediaLibrary
                 label == "开机自启动" -> onToggleAutoStart
+                label == "强制横屏" -> onToggleForceLandscape
                 label == "设置默认桌面" -> onDefaultHome
                 else -> ({})
             }

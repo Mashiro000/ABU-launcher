@@ -8,6 +8,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 object AccountManager {
+    enum class EmbyPlaybackPolicy(val label: String, val description: String) {
+        SMART("智能（推荐）", "按设备能力选择直放、Remux 或服务器转码"),
+        PREFER_DIRECT("优先直接播放", "优先原始媒体；失败时允许服务器转码"),
+        PREFER_TRANSCODE("优先服务器转码", "请求 H.264/AAC 兼容码流，适合性能较弱的设备"),
+        NO_TRANSCODE("禁止服务器转码", "仅允许 Direct Play 或 Direct Stream")
+    }
     private const val PREFS_NAME = "media_library_prefs"
     private const val KEY_ACCOUNTS = "accounts_json"
     private const val KEY_SELECTED_ACCOUNT = "selected_account_id"
@@ -19,6 +25,7 @@ object AccountManager {
     private const val KEY_SHOW_NEXT_UP = "show_next_up"
     private const val KEY_PREFER_DIRECT_PLAY = "prefer_direct_play"
     private const val KEY_ALLOW_INSECURE = "allow_insecure_connections"
+    private const val KEY_EMBY_PLAYBACK_POLICY = "emby_playback_policy"
 
     private lateinit var prefs: SharedPreferences
 
@@ -32,6 +39,7 @@ object AccountManager {
     val showNextUp = mutableStateOf(true)
     val preferDirectPlay = mutableStateOf(true)
     val allowInsecureConnections = mutableStateOf(true)
+    val embyPlaybackPolicy = mutableStateOf(EmbyPlaybackPolicy.SMART)
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -61,6 +69,9 @@ object AccountManager {
         showNextUp.value = prefs.getBoolean(KEY_SHOW_NEXT_UP, true)
         preferDirectPlay.value = prefs.getBoolean(KEY_PREFER_DIRECT_PLAY, true)
         allowInsecureConnections.value = prefs.getBoolean(KEY_ALLOW_INSECURE, true)
+        embyPlaybackPolicy.value = runCatching {
+            EmbyPlaybackPolicy.valueOf(prefs.getString(KEY_EMBY_PLAYBACK_POLICY, EmbyPlaybackPolicy.SMART.name).orEmpty())
+        }.getOrDefault(EmbyPlaybackPolicy.SMART)
     }
 
     fun saveAccounts() {
@@ -120,6 +131,11 @@ object AccountManager {
     fun setShowNextUp(enabled: Boolean) = saveBoolean(KEY_SHOW_NEXT_UP, showNextUp, enabled)
     fun setPreferDirectPlay(enabled: Boolean) = saveBoolean(KEY_PREFER_DIRECT_PLAY, preferDirectPlay, enabled)
     fun setAllowInsecureConnections(enabled: Boolean) = saveBoolean(KEY_ALLOW_INSECURE, allowInsecureConnections, enabled)
+    fun setEmbyPlaybackPolicy(policy: EmbyPlaybackPolicy) {
+        embyPlaybackPolicy.value = policy
+        preferDirectPlay.value = policy != EmbyPlaybackPolicy.PREFER_TRANSCODE
+        prefs.edit().putString(KEY_EMBY_PLAYBACK_POLICY, policy.name).apply()
+    }
 
     private fun saveBoolean(key: String, state: androidx.compose.runtime.MutableState<Boolean>, value: Boolean) {
         state.value = value
