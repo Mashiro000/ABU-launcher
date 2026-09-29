@@ -22,30 +22,32 @@ export interface PluginManifest {
   hostApi: string;
   surfaces?: Array<"home" | "settings" | "player">;
   slots?: Array<"home.quickActions" | "player.overlay">;
-  permissions?: Array<{ id: "storage" | "network"; title: string; sensitive?: boolean }>;
+  permissions?: Array<{ id: "storage" | "network" | "usb" | "bluetooth"; title: string; sensitive?: boolean }>;
   networkDomains?: string[];
   services?: Array<{ name: string; version: number }>;
 }
 
 export interface CapabilityRequest {
   id: string;
-  capability: "device.info" | "storage.get" | "storage.set" | "network.fetch" | "events.publish" | "services.register" | "services.resolve" | "services.call";
+  capability: "device.info" | "storage.get" | "storage.set" | "network.fetch" | "events.publish" | "services.register" | "services.resolve" | "services.call" | "usb.list" | "bluetooth.list";
   arguments?: Record<string, unknown>;
 }
 
 export interface PluginOutput {
   ui?: UiNode;
   capabilities?: CapabilityRequest[];
-  navigation?: { push?: string; pop?: boolean };
+  navigation?: { push?: string; params?: Record<string, unknown>; pop?: boolean };
   value?: Record<string, unknown>;
 }
 
 export interface AbuPlugin {
-  render(input: { surface: Surface; route?: string }): PluginOutput;
-  onAction?(input: { surface: Surface; route?: string; action: string; values?: Record<string, string> }): PluginOutput;
+  render(input: { surface: Surface; route?: string; params?: Record<string, unknown> }): PluginOutput;
+  onAction?(input: { surface: Surface; route?: string; params?: Record<string, unknown>; action: string; values?: Record<string, string> }): PluginOutput;
   onCapabilities?(input: { results: Array<{ id: string; ok: boolean; value?: unknown; error?: string }> }): PluginOutput;
   onEvent?(input: { sourcePluginId: string; topic: string; payload: unknown }): PluginOutput;
   onService?(input: { callerPluginId: string; service: string; method: string; arguments: Record<string, unknown> }): PluginOutput;
+  onDataSource?(input: { operation: "list"; query: string; cursor: string | null }): PluginOutput;
+  onSubtitle?(input: { title: string; durationMs: number; seasonNumber?: number | null; episodeNumber?: number | null }): PluginOutput;
 }
 
 declare global { var ABUPlugin: AbuPlugin; }

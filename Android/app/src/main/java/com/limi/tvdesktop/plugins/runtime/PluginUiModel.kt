@@ -16,7 +16,7 @@ data class PluginUiNode(
     val children: List<PluginUiNode> = emptyList(),
 )
 
-data class PluginNavigation(val push: String? = null, val pop: Boolean = false)
+data class PluginNavigation(val push: String? = null, val params: JSONObject? = null, val pop: Boolean = false)
 
 data class PluginRuntimeOutput(
     val ui: PluginUiNode?,
@@ -63,7 +63,7 @@ object PluginUiParser {
             navigation = root.optJSONObject("navigation")?.let {
                 val push = it.optString("push").takeIf(String::isNotBlank)
                 require(push == null || push.matches(Regex("[a-zA-Z0-9._/-]{1,100}")) && !push.contains("..")) { "插件页面路径无效" }
-                PluginNavigation(push = push, pop = it.optBoolean("pop"))
+                PluginNavigation(push = push, params = it.optJSONObject("params"), pop = it.optBoolean("pop"))
             },
             value = root.optJSONObject("value"),
         )

@@ -47,6 +47,14 @@ class PluginManagerInstrumentedTest {
         }
     }
 
+    @Test fun installedVersionsUseNumericNewestFirst() {
+        val id = "test.versions.${System.nanoTime()}"
+        try {
+            listOf("1.9.0", "1.10.0").forEach { manager.installPackage(packageFile(id, it)) }
+            assertEquals(listOf("1.10.0", "1.9.0"), manager.installed().single { it.id == id }.availableVersions)
+        } finally { manager.uninstall(id) }
+    }
+
     @Test fun rejectsZipPathTraversal() {
         val file = File(context.cacheDir, "bad-${System.nanoTime()}.abu-plugin")
         ZipOutputStream(file.outputStream()).use { zip ->
@@ -59,6 +67,16 @@ class PluginManagerInstrumentedTest {
         } finally {
             file.delete()
         }
+    }
+
+    @Test fun rejectsNonCanonicalZipEntries() {
+        val file = File(context.cacheDir, "duplicate-${System.nanoTime()}.abu-plugin")
+        ZipOutputStream(file.outputStream()).use { zip ->
+            zip.putNextEntry(ZipEntry("manifest.json")); zip.write(byteArrayOf(1)); zip.closeEntry()
+            zip.putNextEntry(ZipEntry("dist/./index.js")); zip.write(byteArrayOf(1)); zip.closeEntry()
+        }
+        try { assertThrows(Exception::class.java) { manager.installPackage(file) } }
+        finally { file.delete() }
     }
 
     @Test fun repositoryAndPermissionStateRoundTrip() {

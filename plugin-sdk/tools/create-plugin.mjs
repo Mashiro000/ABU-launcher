@@ -30,7 +30,7 @@ await writeFile(join(output, "tsconfig.json"), `${JSON.stringify({ compilerOptio
 }, include: ["src/index.ts", "types/abu-plugin.d.ts"] }, null, 2)}\n`);
 await writeFile(join(output, "package.json"), `${JSON.stringify({
   name: id, version: "1.0.0", private: true, type: "module",
-  scripts: { build: "tsc -p . && node tools/pack.mjs .", validate: `node tools/validate.mjs dist/${id}-1.0.0.abu-plugin` },
+  scripts: { build: "tsc -p . && node tools/pack.mjs .", validate: "node tools/validate-project.mjs ." },
   devDependencies: { typescript: "^5.9.2" },
 }, null, 2)}\n`);
 await writeFile(join(output, ".gitignore"), "node_modules/\ndist/\n.keys/\n");

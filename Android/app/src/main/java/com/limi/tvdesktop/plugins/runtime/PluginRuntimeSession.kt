@@ -26,6 +26,7 @@ class PluginRuntimeSession(
         input: JSONObject,
         requestConsent: suspend (PluginConsentRequest) -> Boolean,
         allowServiceCalls: Boolean = true,
+        requestAndroidPermission: suspend (String) -> Boolean = { false },
     ): PluginRuntimeOutput {
         val source = manager.readEntryScript(plugin.id) ?: throw IllegalStateException("插件入口不可用")
         var output = execute(source, method, input)
@@ -35,7 +36,7 @@ class PluginRuntimeSession(
             val results = JSONArray()
             for (request in output.capabilities) {
                 var result = if (request.capability == "services.call") {
-                    if (allowServiceCalls) callService(request, requestConsent)
+                    if (allowServiceCalls) callService(request, requestConsent, requestAndroidPermission)
                     else CapabilityResult.Rejected("服务调用不能嵌套")
                 } else withContext(Dispatchers.IO) { bridge.execute(plugin, request) }
                 if (result is CapabilityResult.NeedsConsent) {
@@ -47,11 +48,17 @@ class PluginRuntimeSession(
                     result = if (granted) withContext(Dispatchers.IO) { bridge.execute(plugin, request) }
                     else CapabilityResult.Rejected("用户拒绝授权")
                 }
+                if (result is CapabilityResult.NeedsAndroidPermission) {
+                    val granted = requestAndroidPermission(result.permission)
+                    result = if (granted) withContext(Dispatchers.IO) { bridge.execute(plugin, request) }
+                    else CapabilityResult.Rejected("用户拒绝系统设备权限")
+                }
                 results.put(JSONObject().put("id", request.id).apply {
                     when (result) {
                         is CapabilityResult.Success -> put("ok", true).put("value", result.value)
                         is CapabilityResult.Rejected -> put("ok", false).put("error", result.reason)
                         is CapabilityResult.NeedsConsent -> put("ok", false).put("error", "permission unresolved")
+                        is CapabilityResult.NeedsAndroidPermission -> put("ok", false).put("error", "Android permission unresolved")
                     }
                 })
             }
@@ -63,6 +70,7 @@ class PluginRuntimeSession(
     private suspend fun callService(
         request: PluginCapabilityRequest,
         requestConsent: suspend (PluginConsentRequest) -> Boolean,
+        requestAndroidPermission: suspend (String) -> Boolean,
     ): CapabilityResult = runCatching {
         val owner = request.arguments.getString("owner")
         val name = request.arguments.getString("name")
@@ -78,7 +86,8 @@ class PluginRuntimeSession(
         val providerSession = PluginRuntimeSession(provider, manager, sandbox, bridge)
         val input = JSONObject().put("callerPluginId", plugin.id).put("service", name)
             .put("method", method).put("arguments", request.arguments.optJSONObject("arguments") ?: JSONObject())
-        val output = providerSession.invokeOutput("onService", input, requestConsent, allowServiceCalls = false)
+        val output = providerSession.invokeOutput("onService", input, requestConsent, allowServiceCalls = false,
+            requestAndroidPermission = requestAndroidPermission)
         CapabilityResult.Success(output.value ?: JSONObject())
     }.getOrElse { CapabilityResult.Rejected(it.message ?: "服务调用失败") }
 

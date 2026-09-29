@@ -78,9 +78,14 @@ import java.util.Locale
 import kotlin.math.min
 import com.limi.tvdesktop.plugins.PluginCrashGuard
 import com.limi.tvdesktop.plugins.PluginManager
+import com.limi.tvdesktop.plugins.PluginKind
+import com.limi.tvdesktop.plugins.runtime.PluginDataSourceBrowser
+import com.limi.tvdesktop.plugins.runtime.PluginSubtitleResolver
+import com.limi.tvdesktop.plugins.runtime.PluginConsentRequest
 import com.limi.tvdesktop.plugins.runtime.PluginSurfaceHost
 import com.limi.tvdesktop.plugins.runtime.PluginSurfaceRegistry
 import com.limi.tvdesktop.plugins.runtime.PluginSlotHost
+import kotlinx.coroutines.CompletableDeferred
 
 class MainActivity : ComponentActivity() {
     private var pluginSafeModeWindowUntil = 0L
@@ -216,7 +221,12 @@ fun TvDesktop() {
     var selected by remember { mutableStateOf<DemoMedia?>(null) }
     var posterWallCategory by remember { mutableStateOf<MediaCategoryInfo?>(null) }
     var playingMedia by remember { mutableStateOf<MediaItemInfo?>(null) }
+    var activeDataSourceId by remember { mutableStateOf<String?>(null) }
+    val dataSourcePlugins = remember(settingsPage, page) {
+        PluginManager.get(context).installed().filter { it.enabled && it.kind == PluginKind.DATA_SOURCE && it.entry != null }
+    }
     var playingInfo by remember { mutableStateOf<TvPlaybackInfo?>(null) }
+    var subtitleConsent by remember { mutableStateOf<Pair<PluginConsentRequest, CompletableDeferred<Boolean>>?>(null) }
     var mpvLaunchedMediaId by remember { mutableStateOf<String?>(null) }
     val mpvLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val returnedPosition = result.data?.getIntExtra("position", -1)?.toLong() ?: -1L
@@ -240,8 +250,22 @@ fun TvDesktop() {
         val m = playingMedia
         playingInfo = null
         if (m != null) {
-            playingInfo = withContext(Dispatchers.IO) {
+            val info = withContext(Dispatchers.IO) {
                 runCatching { MediaLibraryManager.buildPlaybackInfo(m, m.title, m.playbackPositionMs) }.getOrNull()
+            }
+            if (info != null) {
+                val pluginSubtitles = try {
+                    PluginSubtitleResolver.resolve(context, m) { request ->
+                        val answer = CompletableDeferred<Boolean>()
+                        subtitleConsent = request to answer
+                        try { answer.await() } finally { subtitleConsent = null }
+                    }
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    emptyList()
+                }
+                playingInfo = info.copy(externalSubtitleUrls = (info.externalSubtitleUrls + pluginSubtitles).distinct())
             }
         } else {
             mpvLaunchedMediaId = null
@@ -680,6 +704,11 @@ fun TvDesktop() {
                                                         selected = banner
                                                     }
                                                 }
+                                            if (dataSourcePlugins.isNotEmpty()) {
+                                                GlassButton("插件媒体源", Modifier.width(200.dp).height(70.dp)) {
+                                                    activeDataSourceId = dataSourcePlugins.first().id
+                                                }
+                                            }
                                             if (!isRecommendationMode) {
                                                 Column(Modifier.staggeredEntrance(3).width(340.dp)) {
                                                     Progress(banner.progress, Modifier.fillMaxWidth().height(8.dp))
@@ -907,8 +936,34 @@ fun TvDesktop() {
                         }, onWallpaperChanged = { wallpaperVersion++ })
                     }
                 }
+                activeDataSourceId?.let { id ->
+                    dataSourcePlugins.firstOrNull { it.id == id }?.let { plugin ->
+                        PluginDataSourceBrowser(
+                            plugin = plugin,
+                            sources = dataSourcePlugins,
+                            onSelectSource = { activeDataSourceId = it },
+                            onClose = { activeDataSourceId = null },
+                            onPlay = { itemId, title, url ->
+                                activeDataSourceId = null
+                                playingMedia = MediaItemInfo(
+                                    id = "plugin:${plugin.id}:$itemId", accountId = "", serverType = ServerType.EMBY,
+                                    title = title, streamUrl = url, mediaType = "Movie",
+                                )
+                            },
+                        )
+                    }
+                }
                 val media = playingMedia
                 val info = playingInfo
+                subtitleConsent?.let { (request, answer) ->
+                    AlertDialog(
+                        onDismissRequest = { if (!answer.isCompleted) answer.complete(false) },
+                        title = { Text("字幕插件请求权限") },
+                        text = { Text("插件请求“${request.title}”。${if (request.sensitive) "这是敏感权限，请确认信任该插件。" else ""}") },
+                        confirmButton = { TextButton(onClick = { if (!answer.isCompleted) answer.complete(true) }) { Text("允许") } },
+                        dismissButton = { TextButton(onClick = { if (!answer.isCompleted) answer.complete(false) }) { Text("拒绝") } },
+                    )
+                }
                 if (media != null && info != null) {
                     VideoPlayerScreen(
                         title = info.title,

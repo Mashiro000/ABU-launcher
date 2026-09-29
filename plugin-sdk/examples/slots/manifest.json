@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.slots",
+  "name": "Slot demo",
+  "version": "1.0.0",
+  "author": "ABU SDK Example",
+  "description": "Home and player overlay extension points",
+  "kind": "ui",
+  "entry": "dist/index.js",
+  "hostApi": ">=1.1.0 <2.0.0",
+  "surfaces": [],
+  "slots": ["home.quickActions", "player.overlay"],
+  "permissions": [],
+  "networkDomains": [],
+  "services": []
+}

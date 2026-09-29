@@ -21,7 +21,7 @@ npm run validate
 
 脚手架生成独立源码、清单、类型、构建和校验命令，不覆盖已有目录。`dist/com.example.demo-1.0.0.abu-plugin` 可在 ABU「设置 → 插件 → 从本地导入插件」安装；本地导入显示为「未验证」，安装后还须手动启用。修改源码后提高 `manifest.json` 与 `package.json` 的版本，再构建、重新导入。
 
-现有示例可用 `npm run build:examples` 一次构建。`examples/hello` 兼容旧 UI；`multipage`、`service-provider` 和 `service-consumer` 要求宿主 API 1.1。[示例说明](docs/EXAMPLES.md)包含预期行为、权限和测试步骤。
+现有七个示例可用 `npm run build:examples` 一次构建。`examples/hello` 兼容旧 UI；其他多页面、服务、插槽、媒体源和设备示例要求宿主 API 1.1。[示例说明](docs/EXAMPLES.md)包含预期行为、权限和测试步骤。
 
 ## 文档导航
 

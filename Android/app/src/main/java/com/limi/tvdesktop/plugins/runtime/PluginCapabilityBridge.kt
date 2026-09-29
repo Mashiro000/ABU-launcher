@@ -1,12 +1,17 @@
 package com.limi.tvdesktop.plugins.runtime
 
 import android.content.Context
+import android.Manifest
+import android.bluetooth.BluetoothManager
+import android.hardware.usb.UsbManager
+import android.content.pm.PackageManager
 import android.os.Build
 import com.limi.tvdesktop.plugins.InstalledPlugin
 import com.limi.tvdesktop.plugins.PluginManager
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import org.json.JSONArray
 import java.net.URI
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
@@ -14,6 +19,7 @@ import java.util.concurrent.TimeUnit
 sealed interface CapabilityResult {
     data class Success(val value: JSONObject) : CapabilityResult
     data class NeedsConsent(val permission: String) : CapabilityResult
+    data class NeedsAndroidPermission(val permission: String) : CapabilityResult
     data class Rejected(val reason: String) : CapabilityResult
 }
 
@@ -42,6 +48,10 @@ class PluginCapabilityBridge(context: Context) {
                 PluginPermissionState.GRANTED -> Unit
             }
         }
+        if (request.capability == "bluetooth.list" && Build.VERSION.SDK_INT >= 31 &&
+            app.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            return CapabilityResult.NeedsAndroidPermission(Manifest.permission.BLUETOOTH_CONNECT)
+        }
         return runCatching {
             when (request.capability) {
                 "device.info" -> CapabilityResult.Success(JSONObject().put("sdk", Build.VERSION.SDK_INT).put("model", Build.MODEL))
@@ -51,7 +61,8 @@ class PluginCapabilityBridge(context: Context) {
                     CapabilityResult.Success(JSONObject().put("ok", true))
                 }
                 "network.fetch" -> fetch(plugin, request.arguments)
-                "usb.list", "bluetooth.list" -> CapabilityResult.Rejected("此主程序版本尚未开放该设备能力")
+                "usb.list" -> listUsb()
+                "bluetooth.list" -> listBluetooth()
                 "events.publish" -> {
                     val ok = PluginEventBus.publish(plugin.id, request.arguments.getString("topic"), request.arguments.optJSONObject("payload") ?: JSONObject())
                     CapabilityResult.Success(JSONObject().put("published", ok))
@@ -79,7 +90,31 @@ class PluginCapabilityBridge(context: Context) {
     fun setConsent(pluginId: String, permission: String, granted: Boolean) =
         permissions.set(pluginId, permission, if (granted) PluginPermissionState.GRANTED else PluginPermissionState.DENIED)
 
+    fun consentState(pluginId: String, permission: String): PluginPermissionState = permissions.get(pluginId, permission)
+
     private fun storage(pluginId: String) = app.getSharedPreferences("plugin_data_$pluginId", Context.MODE_PRIVATE)
+
+    private fun listUsb(): CapabilityResult {
+        val manager = app.getSystemService(Context.USB_SERVICE) as? UsbManager
+        val devices = JSONArray()
+        manager?.deviceList?.values?.sortedBy { it.deviceId }?.forEach { device ->
+            devices.put(JSONObject().put("id", device.deviceId).put("vendorId", device.vendorId)
+                .put("productId", device.productId).put("deviceClass", device.deviceClass)
+                .put("interfaceCount", device.interfaceCount).put("hasPermission", manager.hasPermission(device)))
+        }
+        return CapabilityResult.Success(JSONObject().put("supported", app.packageManager.hasSystemFeature(PackageManager.FEATURE_USB_HOST)).put("devices", devices))
+    }
+
+    private fun listBluetooth(): CapabilityResult {
+        val adapter = (app.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+        val devices = JSONArray()
+        adapter?.bondedDevices?.sortedBy { it.address }?.forEach { device ->
+            devices.put(JSONObject().put("address", device.address).put("name", device.name ?: "")
+                .put("bondState", device.bondState))
+        }
+        return CapabilityResult.Success(JSONObject().put("supported", adapter != null)
+            .put("enabled", adapter?.isEnabled == true).put("devices", devices))
+    }
 
     private fun fetch(plugin: InstalledPlugin, args: JSONObject): CapabilityResult {
         val url = args.getString("url")

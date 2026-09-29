@@ -5,6 +5,14 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.limi.tvdesktop.plugins.runtime.PluginCapabilityBridge
 import com.limi.tvdesktop.plugins.runtime.PluginRuntimeSession
 import com.limi.tvdesktop.plugins.runtime.PluginSandboxClient
+import com.limi.tvdesktop.plugins.runtime.PluginCapabilityRequest
+import com.limi.tvdesktop.plugins.runtime.CapabilityResult
+import com.limi.tvdesktop.plugins.runtime.PluginDataSource
+import com.limi.tvdesktop.plugins.runtime.PluginSubtitleResolver
+import com.limi.tvdesktop.playbackMediaItem
+import android.Manifest
+import android.os.Build
+import android.content.pm.PackageManager
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.assertTrue
@@ -16,6 +24,90 @@ import java.util.zip.ZipOutputStream
 
 @RunWith(AndroidJUnit4::class)
 class PluginRuntimeInstrumentedTest {
+    @Test fun subtitlePluginResultIsValidatedAndAttachedToNativePlayer() { runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val id = "test.subtitle.${System.nanoTime()}"
+        val file = packageFile(context, id, """
+            globalThis.ABUPlugin = {
+              render() { return {}; },
+              onSubtitle(input) { return {value:{subtitles:[
+                {url:'https://sub.example.com/caption.vtt'},
+                {url:'https://evil.example.com/caption.srt'}
+              ]}}; }
+            };
+        """.trimIndent(), kind = "subtitle", extra = """"permissions":[{"id":"network","title":"Network"}],"networkDomains":["sub.example.com"],""")
+        val manager = PluginManager.get(context)
+        try {
+            manager.installPackage(file)
+            manager.setEnabled(id, true)
+            val plugin = manager.installed().single { it.id == id }
+            val output = PluginSandboxClient(context).use { client ->
+                PluginRuntimeSession(plugin, manager, client, PluginCapabilityBridge(context)).invokeOutput(
+                    "onSubtitle", JSONObject().put("title", "Test"), requestConsent = { false }
+                ).value
+            }
+            val urls = output!!.getJSONArray("subtitles")
+            assertTrue(PluginSubtitleResolver.allowed(plugin, urls.getJSONObject(0).getString("url")))
+            assertTrue(!PluginSubtitleResolver.allowed(plugin, urls.getJSONObject(1).getString("url")))
+            val item = playbackMediaItem("https://media.example.com/a.mp4", listOf("https://sub.example.com/caption.vtt"))
+            assertTrue(item.localConfiguration!!.subtitleConfigurations.single().mimeType == "text/vtt")
+        } finally {
+            manager.uninstall(id)
+            file.delete()
+        }
+    } }
+    @Test fun dataSourcePluginReturnsPagedMediaThroughSandbox() { runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val id = "test.media.${System.nanoTime()}"
+        val source = """
+            globalThis.ABUPlugin = {
+              render() { return {}; },
+              onDataSource(input) {
+                const page = Number(input.cursor || 0);
+                return {value:{items:[{id:String(page),title:'Page '+page,streamUrl:'https://media.example.com/a.mp4'}],nextCursor:page<1?String(page+1):null}};
+              }
+            };
+        """.trimIndent()
+        val file = packageFile(context, id, source, kind = "data_source")
+        val manager = PluginManager.get(context)
+        try {
+            manager.installPackage(file)
+            manager.setEnabled(id, true)
+            val plugin = manager.installed().single { it.id == id }
+            PluginSandboxClient(context).use { client ->
+                val session = PluginRuntimeSession(plugin, manager, client, PluginCapabilityBridge(context))
+                val first = PluginDataSource.parse(session.invokeOutput("onDataSource", JSONObject().put("cursor", JSONObject.NULL), requestConsent = { false }).value)
+                val second = PluginDataSource.parse(session.invokeOutput("onDataSource", JSONObject().put("cursor", first.nextCursor), requestConsent = { false }).value)
+                assertTrue(first.items.single().title == "Page 0" && second.items.single().title == "Page 1")
+                assertTrue(second.nextCursor == null)
+            }
+        } finally {
+            manager.uninstall(id)
+            file.delete()
+        }
+    } }
+    @Test fun deviceEnumerationRequiresPluginAndAndroidConsent() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val plugin = InstalledPlugin(
+            id = "test.devices.${System.nanoTime()}", name = "Devices", version = "1.0.0", description = "",
+            kind = PluginKind.SYSTEM, author = "test", enabled = true, trust = PluginTrust.UNVERIFIED,
+            installedBytes = 0, permissions = listOf(PluginPermission("usb", "USB"), PluginPermission("bluetooth", "Bluetooth")),
+        )
+        val bridge = PluginCapabilityBridge(context)
+        val usb = PluginCapabilityRequest("usb", "usb.list", JSONObject())
+        val bluetooth = PluginCapabilityRequest("bt", "bluetooth.list", JSONObject())
+        assertTrue(bridge.execute(plugin, usb) is CapabilityResult.NeedsConsent)
+        bridge.setConsent(plugin.id, "usb", true)
+        bridge.setConsent(plugin.id, "bluetooth", true)
+        assertTrue(bridge.execute(plugin, usb) is CapabilityResult.Success)
+        val permission = Manifest.permission.BLUETOOTH_CONNECT
+        val hadPermission = Build.VERSION.SDK_INT < 31 || context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+        val result = bridge.execute(plugin, bluetooth)
+        if (hadPermission) assertTrue(result is CapabilityResult.Success && result.value.has("devices"))
+        else assertTrue(result is CapabilityResult.NeedsAndroidPermission)
+        context.getSharedPreferences("plugin_permissions", android.content.Context.MODE_PRIVATE).edit()
+            .remove("${plugin.id}.usb").remove("${plugin.id}.bluetooth").apply()
+    }
     @Test fun isolatedJavascriptRendersHandlesActionAndCallsCapability() { runBlocking {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val id = "test.runtime.${System.nanoTime()}"
@@ -87,9 +179,9 @@ class PluginRuntimeInstrumentedTest {
         }
     } }
 
-    private fun packageFile(context: android.content.Context, id: String, source: String, services: String = "[]"): File {
+    private fun packageFile(context: android.content.Context, id: String, source: String, services: String = "[]", kind: String = "ui", extra: String = ""): File {
         val file = File(context.cacheDir, "$id.abu-plugin")
-        val manifest = """{"schemaVersion":1,"id":"$id","name":"Runtime test","version":"1.0.0","kind":"ui","entry":"dist/index.js","surfaces":["home"],"services":$services}"""
+        val manifest = """{"schemaVersion":1,"id":"$id","name":"Runtime test","version":"1.0.0","kind":"$kind","entry":"dist/index.js","surfaces":["home"],${extra}"services":$services}"""
         ZipOutputStream(file.outputStream()).use { zip ->
             zip.putNextEntry(ZipEntry("manifest.json")); zip.write(manifest.toByteArray()); zip.closeEntry()
             zip.putNextEntry(ZipEntry("dist/index.js")); zip.write(source.toByteArray()); zip.closeEntry()

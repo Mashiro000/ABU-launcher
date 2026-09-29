@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.devices",
+  "name": "Device inventory",
+  "version": "1.0.0",
+  "author": "ABU SDK Example",
+  "description": "Read-only USB and paired Bluetooth inventory",
+  "kind": "ui",
+  "entry": "dist/index.js",
+  "hostApi": ">=1.1.0 <2.0.0",
+  "surfaces": ["settings"],
+  "slots": [],
+  "permissions": [
+    { "id": "usb", "title": "枚举 USB 设备", "sensitive": true },
+    { "id": "bluetooth", "title": "枚举已配对蓝牙设备", "sensitive": true }
+  ],
+  "networkDomains": [],
+  "services": []
+}

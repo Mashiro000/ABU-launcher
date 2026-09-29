@@ -15,5 +15,8 @@
 | 服务找不到 | 提供方须安装且启用、清单声明服务名/版本；调用方 `owner` 是提供方插件 ID，`minimumVersion` 不能高于提供方版本 |
 | 签名失败 | `.abu-plugin` 的任一字节变化都会让签名失效；重新打包后重新签名；更新必须继续使用原发布公钥 |
 | 遥控器焦点异常 | 先复现于内置 `button/input/list`；记录机型和复现视频，暂不要靠任意 Compose 焦点 API 绕过宿主 |
+| 媒体源点播放无反应 | 检查 `streamUrl` 是否为声明域名的 HTTPS URL，插件是否声明并获得 `network` 权限；`value.error` 会在列表页显示 |
+| 字幕没有出现 | 确认插件 `kind=subtitle`、已启用、实现 `onSubtitle`，URL 是白名单域名下的 `.srt`/`.vtt`；HLS/DASH 多周期内容对外挂字幕可能有限制 |
+| 蓝牙清单为空或失败 | 此 API 只返回已配对设备；确认系统蓝牙已启用、插件授权通过、Android 12+ 的 `BLUETOOTH_CONNECT` 已允许；不会主动扫描 |
 
-主程序的插件详情和运行失败提示会显示部分错误，但当前还没有专门的开发者日志命令，也没有自动遮盖所有宿主日志中的敏感字段。调试时只分享已脱敏的信息。对于无法从 UI 诊断的问题，可用 `adb logcat` 过滤应用进程错误，但发布 Issue 前必须手工检查并删除凭据。
+主程序的插件详情和运行失败提示会显示部分错误，但当前还没有专门的开发者日志命令，也没有自动遮盖所有宿主日志中的敏感字段。调试时只分享已脱敏的信息。对于无法从 UI 诊断的问题，可在 Windows/macOS/Linux 用 `adb logcat -d -s PluginRuntime AndroidRuntime TvPlayer` 查看近期运行日志；过滤结果仍需手工删除 URL 中的令牌、账号、设备地址后才能公开。`adb devices` 可先确认设备连接；不要把未脱敏的完整 `logcat` 附在 Issue。

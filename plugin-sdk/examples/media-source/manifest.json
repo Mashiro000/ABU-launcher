@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.media-source",
+  "name": "Google sample media",
+  "version": "1.0.0",
+  "author": "ABU SDK Example",
+  "description": "Public sample catalog with search, pagination and MP4 playback",
+  "kind": "data_source",
+  "entry": "dist/index.js",
+  "hostApi": ">=1.1.0 <2.0.0",
+  "surfaces": [],
+  "slots": [],
+  "permissions": [{ "id": "network", "title": "读取 Google 公共示例媒体目录", "sensitive": true }],
+  "networkDomains": ["storage.googleapis.com"],
+  "services": []
+}

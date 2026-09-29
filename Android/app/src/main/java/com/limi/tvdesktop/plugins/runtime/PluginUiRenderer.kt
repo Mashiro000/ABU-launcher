@@ -4,6 +4,7 @@ import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,6 +27,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.key
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -42,45 +51,62 @@ fun PluginUiRenderer(
     onInput: (String, String) -> Unit = { _, _ -> },
     resolveAsset: (String) -> File? = { null },
     modifier: Modifier = Modifier,
+    currentValues: Map<String, String> = emptyMap(),
+    focusRequesters: MutableMap<String, FocusRequester>? = null,
+    onFocused: (String) -> Unit = {},
+    path: String = "root",
 ) {
-    @Composable fun child(item: PluginUiNode, childModifier: Modifier = Modifier.fillMaxWidth()) =
-        PluginUiRenderer(item, onAction, onInput, resolveAsset, childModifier)
+    @Composable fun child(item: PluginUiNode, index: Int, childModifier: Modifier = Modifier.fillMaxWidth()) =
+        PluginUiRenderer(item, onAction, onInput, resolveAsset, childModifier, currentValues, focusRequesters, onFocused, "$path/$index")
+
+    val focusKey = node.id ?: path
+    val requester = remember(focusKey) { FocusRequester() }
+    if (node.type in setOf("button", "input", "toggle")) focusRequesters?.set(focusKey, requester)
+    val focusModifier = Modifier.focusRequester(requester).onFocusChanged { if (it.isFocused) onFocused(focusKey) }
 
     when (node.type) {
         "column" -> Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            node.children.forEach { child(it) }
+            node.children.forEachIndexed { index, item -> child(item, index) }
         }
         "row" -> Row(modifier, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            node.children.forEach { child(it, Modifier.weight(1f)) }
+            node.children.forEachIndexed { index, item -> child(item, index, Modifier.weight(1f)) }
         }
         "card" -> Column(
             modifier.background(Color(0x1FFFFFFF), RoundedCornerShape(18.dp)).padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) { node.children.forEach { child(it) } }
+        ) { node.children.forEachIndexed { index, item -> child(item, index) } }
         "list" -> LazyColumn(modifier.heightIn(max = 560.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            itemsIndexed(node.children, key = { index, _ -> index }) { _, item -> child(item) }
+            itemsIndexed(node.children, key = { index, _ -> index }) { index, item -> child(item, index) }
         }
         "button" -> Box(
             modifier.background(toneColor(node.tone), RoundedCornerShape(14.dp))
+                .then(focusModifier)
+                .onPreviewKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyDown && event.key in setOf(Key.DirectionCenter, Key.Enter)) {
+                        node.action?.let(onAction)
+                        node.action != null
+                    } else false
+                }
+                .focusable(enabled = node.action != null)
                 .clickable(enabled = node.action != null) { node.action?.let(onAction) }
                 .padding(horizontal = 20.dp, vertical = 14.dp)
         ) { Text(node.text.orEmpty(), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold) }
         "input" -> {
-            var value by remember(node.id, node.value) { mutableStateOf(node.value.orEmpty()) }
+            var value by remember(node.id, node.value) { mutableStateOf(currentValues[node.id] ?: node.value.orEmpty()) }
             OutlinedTextField(
                 value = value,
                 onValueChange = { value = it; node.id?.let { id -> onInput(id, it) } },
                 label = node.text?.let { { Text(it) } },
                 placeholder = node.hint?.let { { Text(it) } },
                 singleLine = true,
-                modifier = modifier,
+                modifier = modifier.then(focusModifier),
             )
         }
         "toggle" -> {
-            var checked by remember(node.id, node.value) { mutableStateOf(node.value == "true") }
+            var checked by remember(node.id, node.value) { mutableStateOf((currentValues[node.id] ?: node.value) == "true") }
             Row(modifier, horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(node.text.orEmpty(), color = Color.White)
-                Switch(checked = checked, onCheckedChange = {
+                Switch(checked = checked, modifier = focusModifier, onCheckedChange = {
                     checked = it
                     node.id?.let { id -> onInput(id, it.toString()) }
                 })

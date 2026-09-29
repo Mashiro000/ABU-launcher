@@ -2,7 +2,7 @@
 
 ## 页面与状态
 
-把 `route` 当成页面名，不要把 JavaScript 全局变量当导航状态。`render({route})` 根据 `root/settings/detail/123` 返回对应 UI；`onAction` 返回 `{navigation:{push:"settings"}}`，宿主重新调用 `render`。返回按钮可返回 `{navigation:{pop:true}}`，Android 返回键也由宿主处理。页面栈最多 16 层；路由只传短 ID，不要在里面放凭据。
+把 `route` 当成页面名，不要把 JavaScript 全局变量当导航状态。`render({route,params})` 根据 `root/settings/detail` 返回对应 UI；`onAction` 可返回 `{navigation:{push:"detail",params:{id:"42"}}}`，宿主重新调用 `render`。返回按钮可返回 `{navigation:{pop:true}}`，Android 返回键也由宿主处理，回退时恢复焦点。页面栈最多 16 层；参数只传短 ID，不要放凭据。
 
 输入框与开关的当前值在 `onAction.values`；对长期设置先调用 `storage.set`，并在下次 `render` 通过 `storage.get` 读取。每次入口脚本重建，因此模块级 `let settings = ...` 不可靠。参考 [`multipage`](../examples/multipage/src/index.ts)。
 
@@ -20,4 +20,4 @@
 
 ## 安全边界
 
-插件不能直接改宿主任意页面、调用任意 Android API 或取得媒体账号凭据。`home`/`settings` 的完整页面接管与两个插槽是目前明确的扩展点。设备能力、媒体数据源/字幕接入和完整播放器页面尚未开放；需要这些功能时先在宿主仓库提出接口需求，不要在脚本里依赖私有 Kotlin 类。
+插件不能直接改宿主任意页面、调用任意 Android API 或取得媒体账号凭据。`home`/`settings` 的完整页面接管与两个插槽是目前明确的 UI 扩展点。API 1.1 的媒体数据源/字幕入口和只读 USB/蓝牙枚举有受限宿主实现，但完整播放器页面、设备通信、主动蓝牙扫描与后台常驻任务仍未开放；需要这些功能时先在宿主仓库提出接口需求，不要在脚本里依赖私有 Kotlin 类。

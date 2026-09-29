@@ -47,6 +47,7 @@ export function validateManifest(manifest) {
       add(`services[${index}]`, "requires a valid name and positive integer version");
     }
   }
+  if (Array.isArray(manifest.services) && new Set(manifest.services.map((service) => service?.name)).size !== manifest.services.length) add("services", "service names must be unique");
   for (const [index, domain] of (Array.isArray(manifest.networkDomains) ? manifest.networkDomains : []).entries()) {
     if (typeof domain !== "string" || !/^[a-z0-9.-]+$/i.test(domain) || domain.startsWith(".") || domain.includes("..")) add(`networkDomains[${index}]`, "use a hostname without protocol or path");
   }

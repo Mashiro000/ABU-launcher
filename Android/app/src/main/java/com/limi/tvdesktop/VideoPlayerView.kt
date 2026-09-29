@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import androidx.media3.common.TrackSelectionOverride
@@ -73,6 +74,20 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 private const val TAG = "TvPlayer"
+
+internal fun playbackMediaItem(url: String, subtitleUrls: List<String>): MediaItem {
+    val subtitles = subtitleUrls.mapNotNull { subtitleUrl ->
+        val mime = when (Uri.parse(subtitleUrl).path?.substringAfterLast('.')?.lowercase()) {
+            "srt" -> MimeTypes.APPLICATION_SUBRIP
+            "vtt" -> MimeTypes.TEXT_VTT
+            else -> null
+        } ?: return@mapNotNull null
+        MediaItem.SubtitleConfiguration.Builder(Uri.parse(subtitleUrl))
+            .setMimeType(mime)
+            .build()
+    }
+    return MediaItem.Builder().setUri(url).setSubtitleConfigurations(subtitles).build()
+}
 
 /**
  * Activity-level key bridge for the player. Compose focus is unreliable once the AndroidView
@@ -234,7 +249,7 @@ fun VideoPlayerScreen(
                 if (activePlayUrl.isBlank()) {
                     Log.e(TAG, "没有可用的播放地址，跳过 prepare")
                 } else if (!useMpv) {
-                    setMediaItem(MediaItem.fromUri(activePlayUrl))
+                    setMediaItem(playbackMediaItem(activePlayUrl, currentMediaInfo.externalSubtitleUrls))
                     // 仅当 startPosition 合理且未超长时 seek
                     if (startPositionMs > 0 && (currentMediaInfo.totalDurationMs == 0L || startPositionMs < currentMediaInfo.totalDurationMs)) {
                         seekTo(startPositionMs)
@@ -255,7 +270,7 @@ fun VideoPlayerScreen(
                 mpvController?.addSubtitle(url, index == 0)
             }
         } else if (exoPlayer.currentMediaItem?.localConfiguration?.uri.toString() != activePlayUrl) {
-            exoPlayer.setMediaItem(MediaItem.fromUri(activePlayUrl), currentMediaInfo.startPositionMs)
+            exoPlayer.setMediaItem(playbackMediaItem(activePlayUrl, currentMediaInfo.externalSubtitleUrls), currentMediaInfo.startPositionMs)
             exoPlayer.prepare()
             exoPlayer.play()
         }
@@ -1252,7 +1267,7 @@ fun VideoPlayerScreen(
                             bufferingSince = System.currentTimeMillis()
                             if (activePlayUrl.isNotBlank()) {
                                 if (useMpv) mpvController?.load(activePlayUrl, currentPosition) else {
-                                    exoPlayer.setMediaItem(MediaItem.fromUri(activePlayUrl))
+                                    exoPlayer.setMediaItem(playbackMediaItem(activePlayUrl, currentMediaInfo.externalSubtitleUrls))
                                     exoPlayer.prepare()
                                     exoPlayer.play()
                                 }

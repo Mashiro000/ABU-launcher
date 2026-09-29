@@ -4,6 +4,7 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import com.limi.tvdesktop.plugins.runtime.PluginServiceRegistry
+import com.limi.tvdesktop.plugins.runtime.PluginDeviceEvents
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -22,6 +23,7 @@ class PluginManager private constructor(private val context: Context) {
 
     init {
         recoverInterruptedOperations()
+        PluginDeviceEvents.start(context)
         installed().filter(InstalledPlugin::enabled).forEach { plugin ->
             plugin.services.forEach { PluginServiceRegistry.register(plugin.id, it.name, it.version) }
         }
@@ -51,7 +53,7 @@ class PluginManager private constructor(private val context: Context) {
     fun setEnabled(id: String, enabled: Boolean) {
         val dir = safePluginDir(id)
         require(File(dir, "manifest.json").isFile) { "插件不存在" }
-        if (enabled) requireHostApi(JSONObject(File(dir, "manifest.json").readText()))
+        if (enabled) validateInstalledManifest(JSONObject(File(dir, "manifest.json").readText()))
         else PluginServiceRegistry.unregisterPlugin(id)
         prefs.edit().putBoolean("enabled.$id", enabled)
             .also { if (enabled) it.putString("last_enabled_plugin", id) }
@@ -65,7 +67,7 @@ class PluginManager private constructor(private val context: Context) {
         require(versionDir.isDirectory && File(versionDir, "manifest.json").isFile) { "插件版本不存在" }
         val manifest = JSONObject(File(versionDir, "manifest.json").readText())
         require(manifest.getString("id") == id && manifest.getString("version") == version) { "插件版本清单不匹配" }
-        requireHostApi(manifest)
+        validateInstalledManifest(manifest)
         writeAtomically(File(pluginRoot, "current"), version)
         writeAtomically(File(pluginRoot, "manifest.json"), manifest.toString(2))
         PluginServiceRegistry.unregisterPlugin(id)
@@ -84,7 +86,7 @@ class PluginManager private constructor(private val context: Context) {
     fun readEntryScript(id: String): String? {
         val plugin = installed().firstOrNull { it.id == id && it.enabled } ?: return null
         val entry = plugin.entry ?: return null
-        require(!entry.startsWith('/') && !entry.contains("..")) { "插件入口路径无效" }
+        require(PluginScriptManifestValidator.validPath(entry)) { "插件入口路径无效" }
         val root = currentVersionDir(id) ?: return null
         val file = File(root, entry)
         require(file.canonicalPath.startsWith(root.canonicalPath + File.separator)) { "插件入口越界" }
@@ -142,6 +144,15 @@ class PluginManager private constructor(private val context: Context) {
             requireHostApi(manifest)
             val kind = runCatching { PluginKind.valueOf(manifest.getString("kind").uppercase()) }
                 .getOrElse { throw IllegalArgumentException("插件类型无效") }
+            if (kind != PluginKind.PLAYER && manifest.optString("hostApi").isNotBlank()) {
+                PluginScriptManifestValidator.validate(manifest)
+                staging.walkTopDown().filter(File::isFile).forEach { file ->
+                    val relative = file.relativeTo(staging).invariantSeparatorsPath
+                    require(relative == "manifest.json" || relative.startsWith("dist/") || relative.startsWith("assets/")) {
+                        "插件包包含不允许的文件：$relative"
+                    }
+                }
+            }
             val entry = manifest.optString("entry")
             val services = manifest.optJSONArray("services") ?: JSONArray()
             for (i in 0 until services.length()) {
@@ -218,7 +229,7 @@ class PluginManager private constructor(private val context: Context) {
             } ?: PluginTrust.UNVERIFIED,
             installedBytes = dir.walkTopDown().filter { it.isFile }.sumOf { it.length() },
             permissions = permissions,
-            availableVersions = versions.sortedDescending(),
+            availableVersions = versions.sortedWith(::comparePluginVersions).reversed(),
             entry = manifest.optString("entry").takeIf { it.isNotBlank() },
             surfaces = manifest.stringList("surfaces"),
             slots = manifest.stringList("slots"),
@@ -243,9 +254,13 @@ class PluginManager private constructor(private val context: Context) {
         val targetPath = target.canonicalPath + File.separator
         var extractedBytes = 0L
         var entries = 0
+        val names = mutableSetOf<String>()
         ZipInputStream(FileInputStream(zip)).use { input ->
             generateSequence { input.nextEntry }.forEach { entry ->
                 require(++entries <= 2_000) { "插件包文件数量过多" }
+                require(names.add(entry.name)) { "插件包包含重复路径：${entry.name}" }
+                val normalizedName = entry.name.removeSuffix("/")
+                require(PluginScriptManifestValidator.validPath(normalizedName)) { "插件包包含非法路径：${entry.name}" }
                 val out = File(target, entry.name)
                 require(out.canonicalPath.startsWith(targetPath)) { "插件包包含非法路径" }
                 if (entry.isDirectory) out.mkdirs() else {
@@ -276,6 +291,12 @@ class PluginManager private constructor(private val context: Context) {
         require(hostApi.isBlank() || PluginHostApi.supports(hostApi)) {
             "插件要求的宿主 API $hostApi 与当前 ${PluginHostApi.VERSION} 不兼容"
         }
+    }
+
+    private fun validateInstalledManifest(manifest: JSONObject) {
+        requireHostApi(manifest)
+        val kind = manifest.optString("kind")
+        if (kind != "player" && manifest.optString("hostApi").isNotBlank()) PluginScriptManifestValidator.validate(manifest)
     }
 
     private fun saveRepositories(repositories: List<PluginRepository>) {
@@ -339,6 +360,20 @@ class PluginManager private constructor(private val context: Context) {
             instance ?: PluginManager(context.applicationContext).also { instance = it }
         }
     }
+}
+
+/** Numeric dotted versions sort as users expect (1.10.0 after 1.9.0); legacy labels fall back to text. */
+internal fun comparePluginVersions(left: String, right: String): Int {
+    val a = left.split(Regex("[._+-]"))
+    val b = right.split(Regex("[._+-]"))
+    for (index in 0 until maxOf(a.size, b.size)) {
+        val x = a.getOrNull(index) ?: "0"
+        val y = b.getOrNull(index) ?: "0"
+        val numeric = x.toLongOrNull()?.let { xv -> y.toLongOrNull()?.let(xv::compareTo) }
+        val compared = numeric ?: x.compareTo(y, ignoreCase = true)
+        if (compared != 0) return compared
+    }
+    return left.compareTo(right, ignoreCase = true)
 }
 
 private fun JSONObject.stringList(name: String): List<String> {
