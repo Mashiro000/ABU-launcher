@@ -1,0 +1,34 @@
+name: Plugin SDK
+
+on:
+  push:
+    paths:
+      - "plugin-sdk/**"
+      - ".github/workflows/plugin-sdk.yml"
+  pull_request:
+    paths:
+      - "plugin-sdk/**"
+      - ".github/workflows/plugin-sdk.yml"
+  workflow_dispatch:
+
+jobs:
+  sdk:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: plugin-sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install SDK dependencies
+        run: npm install --ignore-scripts
+      - name: Build all reference plugins
+        run: npm run build:examples
+      - name: Validate tooling and scaffold
+        run: npm run test:tools
