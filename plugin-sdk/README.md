@@ -171,7 +171,7 @@ node tools/pack.mjs path/to/your-plugin
 
 1. 用自己的 Ed25519 私钥签名 `.abu-plugin`，私钥永久保留在自己手中，绝不能提交。
 2. 在自己的公开 GitHub 仓库创建 Release，并上传插件包与对应源码。
-3. Fork `Mashiro000/ABU-plugins`，在 `catalog/` 添加插件描述文件。
+3. Fork `Mashiro000/ABU-plugins`，为插件建立 `plugins/<插件ID>/` 文件夹，并把每个版本分别放进 `versions/`。
 4. 运行 `npm run check:index`，然后提交 Pull Request。
 5. 维护者审核源码、权限、签名、公钥连续性和安装测试；通过后合并，应用会自动读取新索引。
 
