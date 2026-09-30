@@ -1,6 +1,6 @@
 # 版本兼容与变更
 
-| 能力 | 已发布 0.03 | 源码中的宿主 API 1.1（待新 APK） |
+| 能力 | 稳定版 0.03 | [0.04 Beta 1](https://github.com/Mashiro000/ABU-launcher/releases/tag/v0.04-beta.1) / 宿主 API 1.1 |
 | --- | --- | --- |
 | QuickJS 同步入口、基本 UI、存储、HTTPS、事件 | 有 | 保留 |
 | `hostApi` 安装/启用/切换检查 | 无 | 有，范围语法 `>=x.y.z <x.y.z` |

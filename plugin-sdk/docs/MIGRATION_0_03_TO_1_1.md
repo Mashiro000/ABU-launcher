@@ -1,6 +1,6 @@
 # 从 ABU 0.03 插件迁移到宿主 API 1.1
 
-API 1.1 是**宿主协议版本**，不是插件包版本。已发布的 0.03 APK 不会因为插件清单写入 `hostApi` 就自动具备新 API；必须先安装包含 API 1.1 的新版 APK。新版目前仍在验收，尚未正式发布。
+API 1.1 是**宿主协议版本**，不是插件包版本。已发布的 0.03 APK 不会因为插件清单写入 `hostApi` 就自动具备新 API；必须先安装包含 API 1.1 的新版 APK。目前可用的是 [0.04 Beta 1 预览版](https://github.com/Mashiro000/ABU-launcher/releases/tag/v0.04-beta.1)，正式版仍在验收。
 
 ## 老插件继续运行
 

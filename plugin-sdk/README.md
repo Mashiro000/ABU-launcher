@@ -2,7 +2,7 @@
 
 ABU 的第三方脚本插件是 `.abu-plugin` ZIP 包，不是独立 APK。JavaScript 在隔离的 QuickJS 进程中执行；页面、存储、网络和插件协作都由宿主代理。插件不能直接取得 Android `Context`、Emby 凭据或其他插件的数据。
 
-**先核对版本：** 已发布的 ABU Launcher 0.03 只支持旧协议的少量 UI 和能力。此仓库正在开发的宿主 API 1.1 才提供多页面、表单、图片、服务调用和清单兼容检查；在包含这些改动的新 APK 发布并安装前，不能把下面的新示例当成 0.03 可运行插件。[兼容表](docs/COMPATIBILITY.md)列出了差别。
+**先核对版本：** 稳定版 ABU Launcher 0.03 只支持旧协议的少量 UI 和能力。[0.04 Beta 1 预览版](https://github.com/Mashiro000/ABU-launcher/releases/tag/v0.04-beta.1)包含宿主 API 1.1，提供多页面、表单、图片、服务调用和清单兼容检查；下面的新示例不能在 0.03 上运行。[兼容表](docs/COMPATIBILITY.md)列出了差别。
 
 ## 从零创建
 
