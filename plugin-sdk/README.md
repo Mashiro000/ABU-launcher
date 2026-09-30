@@ -35,5 +35,6 @@ npm run validate
 - [旧插件迁移到 API 1.1](docs/MIGRATION_0_03_TO_1_1.md)
 - [调试与故障排查](docs/TROUBLESHOOTING.md)
 - [官方插件库投稿指南](https://github.com/Mashiro000/ABU-plugins/blob/main/CONTRIBUTING.md)
+- [API 1.1 独立开发者验收任务](../docs/PLUGIN_DEVELOPER_ACCEPTANCE.md)
 
 完整 TypeScript 契约在 [`types/abu-plugin.d.ts`](types/abu-plugin.d.ts)。如果文档与实际 API 有出入，请以宿主实现为准并提交 Issue；不要假设文档中标记“未接入”的能力可以调用。
