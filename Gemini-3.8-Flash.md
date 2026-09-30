@@ -12,7 +12,7 @@
 
 ### 核心设计哲学
 1. **纯粹原生 Jetpack Compose**：彻底摆脱传统 Android TV 对旧版 Leanback 架构或跨平台方案（如 Flutter）的依赖，基于 100% Kotlin + Jetpack Compose 打造，具有极高的渲染性能和现代化声明式 UI 表达力。
-2. **Apple TV / tvOS 极致拟物与流体交互**：深度复刻 tvOS 标志性的视觉语言，包括 G2 连续曲率超椭圆（Squircle）、高动态焦点悬浮光晕（Focus Glow & Sweep）、实时多阶毛玻璃拟态（Progressive Frosted Glass）以及卡片向详情页展开的流体转场。
+2. **原生大屏视觉与流体交互**：采用 G2 连续曲率超椭圆（Squircle）、焦点悬浮光晕（Focus Glow & Sweep）、渐进式毛玻璃（Progressive Frosted Glass）以及卡片向详情页展开的转场。
 3. **软硬件全代系兼容**：最低运行版本定为 **Android 9 (API 28)**，并针对 Android 13+ (API 33) 采用硬件加速的实时渐进式模糊（Haze），在低版本设备上采用后台线程降采样高斯盒式模糊平滑降级，确保在高中低端电视芯片上均能流畅稳定运行。
 
 ---
@@ -67,7 +67,7 @@ e:\limi\launcher 3\
                 ├── MainActivity.kt           # 核心容器、全局顶栏、媒体库主屏与状态中枢
                 ├── HomePage.kt               # "首页"：时钟农历、毛玻璃 Dock 栏与本地 App 启动
                 ├── MediaDetailPage.kt        # "媒体详情页"：无缝卡片展开转场、选集与演职员
-                ├── ControlCenter.kt          # "快捷控制中心"：tvOS 风格抽屉、设备模式与开关
+                ├── ControlCenter.kt          # "快捷控制中心"：抽屉、设备模式与开关
                 ├── AppIconProcessor.kt       # 智能 App 图标解析提取器、自适应取色与色彩微调
                 ├── ContinuousCornerShape.kt  # 核心数学造型：G2 连续曲率圆角 (Squircle)
                 ├── FocusSweep.kt             # 焦点光泽扫光动效 (Linear Gradient Sweep)
@@ -121,7 +121,7 @@ e:\limi\launcher 3\
 
 ### 4.6 智能 App 提取与色彩提炼引擎 (`AppIconProcessor.kt` & `HomePage.kt`)
 * **首页 Dock 栏**：
-  * 查询系统所有具备 `CATEGORY_LAUNCHER` / `CATEGORY_LEANBACK_LAUNCHER` 的已安装应用，展示在类似 tvOS 的底部 Dock 栏。
+  * 查询系统所有具备 `CATEGORY_LAUNCHER` / `CATEGORY_LEANBACK_LAUNCHER` 的已安装应用，展示在底部 Dock 栏。
 * **多模式图标智能归一化**：
   * 针对不同类型应用图标（`AdaptiveIconDrawable`、单色图标、透明 Logo、Legacy 图标）进行通道分离与边缘探测。
   * 自动提取前景图标、居中并缩放至标准面积，剔除杂乱背景。
@@ -137,7 +137,7 @@ e:\limi\launcher 3\
 
 ## 5. 项目亮点与优势总结
 
-1. **工业级 TV UI 交互质感**：无论是毛玻璃的纵深层次感、超椭圆圆角、焦点动态放大，还是丝滑的滚动阻尼，在当前开源 Android TV 项目中均处于领先水平，完全媲美甚至超越了 Apple TV 的原生体验。
+1. **面向多设备形态的原生交互**：以 TV、主机和掌机三种模式为产品方向，结合毛玻璃、超椭圆圆角、焦点反馈与滚动动效；其中主机专属功能和完整掌机模式仍在开发。
 2. **极佳的代码架构与模块解耦**：虽然目前是单模块项目，但各个逻辑切片（数学形状、动效、焦点调度、图标处理、视口自适应）职责清晰明确，扩展性极强。
 3. **健全的验证基线**：`qa/` 目录下保留了 110 余张在不同设备（模拟器、MuMu 模拟器、真机）上的关键帧与边界测试截图，并配有详尽的 `VERIFICATION.md` 验证文档，质量要求极高。
 

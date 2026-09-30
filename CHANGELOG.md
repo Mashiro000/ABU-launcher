@@ -22,6 +22,6 @@
 ## 0.0.1-beta
 
 - 首个公开测试版。
-- 原生 Kotlin + Jetpack Compose Android TV 桌面与 tvOS 风格界面。
+- 原生 Kotlin + Jetpack Compose Android TV 桌面与大屏焦点交互界面。
 - 支持遥控器、鼠标和触控操作，以及系统桌面/独立应用两种入口。
 - 提供壁纸、毛玻璃、焦点动效和基础桌面设置。

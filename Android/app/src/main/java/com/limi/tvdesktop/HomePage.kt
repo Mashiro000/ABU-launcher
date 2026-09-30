@@ -770,7 +770,7 @@ private fun GridAppItem(
     }
 }
 
-/** tvOS-style brand gradient: preserve HSL hue/saturation and vary lightness by 5%. */
+/** Brand gradient: preserve HSL hue/saturation and vary lightness by 5%. */
 private fun createBrandGradient(baseColor: Color): Brush {
     val baseHsl = FloatArray(3)
     androidx.core.graphics.ColorUtils.colorToHSL(baseColor.toArgb(), baseHsl)

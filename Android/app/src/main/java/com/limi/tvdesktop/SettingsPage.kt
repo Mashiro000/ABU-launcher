@@ -140,7 +140,7 @@ private fun itemsFor(category: SettingsCategory, context: Context): List<Pair<St
         "网络连接状态" to "Wi-Fi 已连接",
         "系统语言" to "简体中文",
         "设备存储空间" to "可用 48.6 GB / 64 GB",
-        "软件版本号" to "0.1.0-tvOS",
+        "软件版本号" to (context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "未知"),
         "开发者选项" to "性能测试、遥控器与设备诊断"
     )
 }
@@ -238,7 +238,7 @@ internal fun SettingsPage(
                 .fillMaxSize()
                 .padding(horizontal = 72.dp, vertical = 48.dp)
         ) {
-            // Left sidebar: Apple TV tvOS category list
+            // Left sidebar: settings categories
             TvSettingsSidebar(
                 selected = category,
                 requesters = leftRequesters,
@@ -388,7 +388,7 @@ internal fun SettingsPage(
     }
 }
 
-/** tvOS left sidebar with vibrant icon badges and high-contrast focus capsules */
+/** Settings sidebar with icon badges and high-contrast focus capsules. */
 @Composable
 private fun TvSettingsSidebar(
     selected: SettingsCategory,
@@ -751,7 +751,7 @@ private fun GlassSliderRow(
     }
 }
 
-/** tvOS Inset Grouped card item with focus zoom, pure white background on focus, and robust remote D-pad click */
+/** Inset grouped card item with focus zoom, a white focus background, and remote D-pad click. */
 @Composable
 internal fun SettingsRowItem(
     label: String,

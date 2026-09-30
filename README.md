@@ -7,9 +7,9 @@
 [![QQ Group](https://img.shields.io/badge/QQ%E4%BA%A4%E6%B5%81%E7%BE%A4-367281933-red.svg)](https://qm.qq.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**ABU Launcher（阿布桌面）** 是一款专为 Android 智能电视及机顶盒大屏设备打造的高性能、现代化**原生电视桌面（Android TV Launcher）**。
+**ABU Launcher（阿布桌面）** 是一款面向 Android 电视、机顶盒与掌机的原生桌面，围绕 **TV 模式、主机模式、掌机模式** 打造不同设备上的使用体验。
 
-基于 **100% Kotlin + Jetpack Compose** 纯原生开发，彻底摆脱传统 Android TV 对旧版 Leanback 架构或跨平台方案（如 Flutter）的依赖，深度复刻类似 Apple TV / tvOS 的极致流体拟态视觉与焦点动效交互。
+项目基于 **Kotlin + Jetpack Compose** 原生开发，注重遥控器、手柄与触控输入，以及媒体播放、插件扩展和流畅的焦点交互。
 
 > 💬 **用户与开发者官方 QQ 交流群**：**`367281933`**（欢迎加群反馈体验、交流功能建议、获取最新内测包）
 
@@ -23,7 +23,10 @@
 
 ## ✨ 核心特性
 
-- 🎨 **Apple TV / tvOS 视觉哲学**：
+- 📺 **TV 模式**：当前提供面向大屏的桌面、媒体库、遥控器焦点交互与播放器。
+- 🎮 **主机模式**：以减少干扰、突出游戏内容为方向；控制中心已有入口，专属模式功能仍在开发。
+- 🕹️ **掌机模式**：面向手持设备、手柄与触控场景；仍在开发，当前版本尚未提供完整模式。
+- 🎨 **原生视觉与交互**：
   - G2 连续曲率超椭圆（Squircle）胶囊与卡片。
   - 高动态焦点悬浮光晕（Focus Glow & Sweep）与平滑缩放反馈。
   - 媒体卡片展开至电影/剧集详情页的弹性流体过渡（Spring 物理动画与共享时间轴入场动效）。

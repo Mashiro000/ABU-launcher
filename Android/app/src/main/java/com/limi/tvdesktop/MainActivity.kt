@@ -1127,7 +1127,7 @@ private fun ScreenSaverOverlay(onDismiss: () -> Unit) {
                 .background(Color.Black.copy(alpha = 0.38f))
         )
 
-        // Apple TV style Clock & Date in bottom-left corner
+        // Clock and date in the bottom-left corner
         Column(
             modifier = Modifier
                 .align(Alignment.BottomStart)
