@@ -27,6 +27,26 @@
 
 `id` 为 3–100 位英文字母、数字、点、连字符或下划线；发布后保持不变。`version` 是 1–64 位版本字符串；目前宿主的版本保留与排序不是严格 SemVer 解析，建议使用 `1.2.3` 格式。`hostApi` 只接受 `>=x.y.z <x.y.z`；新宿主在安装、启用和切换版本时检查，不兼容则拒绝。缺省 `hostApi` 为旧包兼容而允许，但新插件必须显式声明。`kind` 可写 `ui`、`system`、`data_source`、`subtitle`。后两者只在 API 1.1 新 APK 中有宿主入口，0.03 不能运行其媒体功能。
 
+清单字段对照（“无效”列用于识别打包/安装失败；可选数组省略时视为空）：
+
+| 字段 | 合法示例 | 无效或不能生效的示例 |
+| --- | --- | --- |
+| `schemaVersion` | `1` | `2`：当前只识别版本 1 |
+| `id` | `com.example.demo` | `ab`（太短）、`com/example`（含斜线） |
+| `name`、`author` | `"Demo"`、`"Alice"` | `""` 或只有空格 |
+| `description` | `"天气首页"`，也可省略 | 不是功能声明；不能据此申请权限 |
+| `version` | `"1.2.3"` | `" 1.2.3"`（前导空格）、超过 64 位 |
+| `kind` | `"ui"`、`"system"`、`"data_source"`、`"subtitle"` | `"player"`：第三方脚本包不能声明原生播放器类型 |
+| `entry` | `"dist/index.js"` | `"../index.js"`、`"C:\\index.js"`、`"index.ts"`；文件也必须实际在包内 |
+| `hostApi` | `">=1.1.0 <2.0.0"` | `"^1.1.0"`、不包含当前宿主 API 的范围；旧包可省略，新项目不要省略 |
+| `surfaces` | `["home","settings"]` | `["search"]`；`"player"` 虽可声明，但完整播放器页面目前未挂载，不能据此接管播放器 |
+| `slots` | `["home.quickActions","player.overlay"]` | `["settings.footer"]`：尚无该插槽 |
+| `permissions` | `[{"id":"network","title":"获取频道","sensitive":false}]` | `[{"id":"location","title":"定位"}]` 或缺少 `title`；支持的 ID 仅 `storage`、`network`、`usb`、`bluetooth` |
+| `networkDomains` | `["api.example.com"]`，且声明 `network` 权限 | `["https://api.example.com/path"]`、`["*.example.com"]`、未声明 `network` 权限 |
+| `services` | `[{"name":"library","version":1}]` | 版本 `0`、重复名称或名称含 `/` |
+
+这些限制同时由 SDK 校验器与 API 1.1 宿主执行。`networkDomains` 是精确主机名白名单，不接受协议、路径或通配符；`permissions.sensitive` 只是向用户展示风险的布尔标记，不会代替 Android 授权。
+
 `surfaces` 目前实际挂载 `home`、`settings`，同一完整页面只选一个已启用插件，优先级为官方、已验证、未验证，同级按 ID 排序。`player` 字段虽然能声明，完整播放器页面目前没有挂载点，不要使用。`slots` 可写 `home.quickActions`、`player.overlay`；多个已启用插件按 ID 排列，插件收到的 `surface` 为 `slot:<名称>`，例如 `slot:home.quickActions`。插件不能覆盖原生安全、授权和账号页面。`services` 的名称为 1–100 位字母、数字、点、连字符或下划线，版本为正整数；启用时自动注册，停用或卸载后自动撤销。
 
 包的 Ed25519 签名**不放在 ZIP 里**：官方库版本 JSON 的每个资产条目存公钥对应的签名、SHA-256、大小和固定下载 URL。签名覆盖完整 ZIP 字节；本地导入无仓库验证，显示“未验证”。
