@@ -29,6 +29,7 @@ import com.limi.tvdesktop.plugins.InstalledPlugin
 import com.limi.tvdesktop.plugins.PluginManager
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.filter
 import androidx.compose.runtime.withFrameNanos
 import org.json.JSONObject
@@ -59,37 +60,37 @@ fun PluginSurfaceHost(plugin: InstalledPlugin, surface: String, modifier: Modifi
     DisposableEffect(client) { onDispose(client::close) }
 
     suspend fun invoke(method: String, input: JSONObject) {
-        runCatching {
-            session.invokeOutput(method, input, requestConsent = { request ->
+        try {
+            val output = session.invokeOutput(method, input, requestConsent = { request ->
                 val answer = CompletableDeferred<Boolean>()
                 consent = request to answer
-                answer.await().also { consent = null }
+                try { answer.await() } finally { consent = null }
             }, requestAndroidPermission = { permission ->
                 val answer = CompletableDeferred<Boolean>()
                 systemPermissionAnswer = answer
                 systemPermissionLauncher.launch(permission)
-                answer.await()
+                try { answer.await() } finally { systemPermissionAnswer = null }
             })
-        }.fold(
-            onSuccess = { output ->
-                output.ui?.let { node = it }
-                error = null
-                val navigation = output.navigation
-                val next = when {
-                    method == "render" -> null
-                    navigation?.push != null && routes.size < 16 -> routes + PluginRoute(navigation.push, navigation.params ?: JSONObject())
-                    navigation?.pop == true && routes.size > 1 -> routes.dropLast(1)
-                    else -> null
-                }
-                if (next != null) {
-                    routes = next
-                    node = null
-                    focusRequesters.clear()
-                    invoke("render", renderInput(surface, routes.last()))
-                }
-            },
-            onFailure = { error = "插件运行失败：${it.message}" },
-        )
+            output.ui?.let { node = it }
+            error = null
+            val navigation = output.navigation
+            val next = when {
+                method == "render" -> null
+                navigation?.push != null && routes.size < 16 -> routes + PluginRoute(navigation.push, navigation.params ?: JSONObject())
+                navigation?.pop == true && routes.size > 1 -> routes.dropLast(1)
+                else -> null
+            }
+            if (next != null) {
+                routes = next
+                node = null
+                focusRequesters.clear()
+                invoke("render", renderInput(surface, routes.last()))
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            error = "插件运行失败：${failure.message}"
+        }
     }
 
     LaunchedEffect(plugin.id, plugin.version, surface) {

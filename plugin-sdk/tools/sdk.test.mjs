@@ -8,8 +8,15 @@ import { createHash, generateKeyPairSync, sign, verify } from "node:crypto";
 import { validateManifest } from "./manifest.mjs";
 import { validatePackage } from "./validate.mjs";
 import { writeZip } from "./zip-writer.mjs";
+import { safeDiagnosticLine } from "./logs.mjs";
 
 const example = resolve("dist/com.example.hello-1.0.0.abu-plugin");
+
+test("debug log command outputs phases without credentials", () => {
+  const raw = "D/ABUPlugin: pluginId=com.example.a phase=network.fetch result=Rejected token=private https://host/path?key=private";
+  assert.equal(safeDiagnosticLine(raw, "com.example.a"), "pluginId=com.example.a phase=network.fetch result=Rejected");
+  assert.equal(safeDiagnosticLine(raw, "com.example.b"), null);
+});
 
 test("manifest validator rejects unsupported host declarations", () => {
   const base = { schemaVersion: 1, id: "com.example.app", version: "1.0.0", name: "App", author: "Dev", kind: "ui", entry: "dist/index.js" };

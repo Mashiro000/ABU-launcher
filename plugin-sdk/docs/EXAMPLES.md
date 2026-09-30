@@ -10,6 +10,7 @@
 | [`service-consumer`](../examples/service-consumer/) | API 1.1 新 APK | 无 | 输入关键字，调用提供方服务并显示列表；停用提供方后显示失败提示 |
 | [`slots`](../examples/slots/) | API 1.1 新 APK | 无 | 首页快捷操作与播放器叠层，不接管完整页面 |
 | [`media-source`](../examples/media-source/) | API 1.1 新 APK | `network` | 读取 Google 公共示例目录，搜索/分页，交给宿主播放；不是影视库 |
+| [`subtitle`](../examples/subtitle/) | API 1.1 新 APK | `network` | 标题匹配 Elephants Dream 时返回公开 WebVTT 字幕；其他视频不配错字幕 |
 | [`devices`](../examples/devices/) | API 1.1 新 APK | `usb`、`bluetooth` | 设置页只读列出 USB 与已配对蓝牙设备；无硬件时显示空列表 |
 
 服务联动测试顺序：先安装并启用 provider、consumer；进入 consumer 所有的首页，搜索 `ABU`；应显示两项。停用 provider 再搜索，应看到“服务不可用”。重新启用后恢复。示例结果是本地静态数据，不是真实影视库。

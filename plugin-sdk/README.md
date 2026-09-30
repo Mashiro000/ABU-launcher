@@ -21,7 +21,9 @@ npm run validate
 
 脚手架生成独立源码、清单、类型、构建和校验命令，不覆盖已有目录。`dist/com.example.demo-1.0.0.abu-plugin` 可在 ABU「设置 → 插件 → 从本地导入插件」安装；本地导入显示为「未验证」，安装后还须手动启用。修改源码后提高 `manifest.json` 与 `package.json` 的版本，再构建、重新导入。
 
-现有七个示例可用 `npm run build:examples` 一次构建。`examples/hello` 兼容旧 UI；其他多页面、服务、插槽、媒体源和设备示例要求宿主 API 1.1。[示例说明](docs/EXAMPLES.md)包含预期行为、权限和测试步骤。
+连接 Android 设备后，在生成项目运行 `npm run logs` 可按插件 ID 查看调用阶段、权限结果类别与错误类别；日志命令不输出网络正文或账号凭据。
+
+现有八个示例可用 `npm run build:examples` 一次构建。`examples/hello` 兼容旧 UI；其他多页面、服务、插槽、媒体源、字幕和设备示例要求宿主 API 1.1。[示例说明](docs/EXAMPLES.md)包含预期行为、权限和测试步骤。
 
 ## 文档导航
 
@@ -30,6 +32,7 @@ npm run validate
 - [多页面、持久化、网络错误和依赖降级模式](docs/PATTERNS.md)
 - [示例与验收步骤](docs/EXAMPLES.md)
 - [兼容性和已知缺口](docs/COMPATIBILITY.md)
+- [旧插件迁移到 API 1.1](docs/MIGRATION_0_03_TO_1_1.md)
 - [调试与故障排查](docs/TROUBLESHOOTING.md)
 - [官方插件库投稿指南](https://github.com/Mashiro000/ABU-plugins/blob/main/CONTRIBUTING.md)
 

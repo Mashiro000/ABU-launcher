@@ -10,6 +10,8 @@ import com.limi.tvdesktop.plugins.runtime.CapabilityResult
 import com.limi.tvdesktop.plugins.runtime.PluginDataSource
 import com.limi.tvdesktop.plugins.runtime.PluginSubtitleResolver
 import com.limi.tvdesktop.playbackMediaItem
+import com.limi.tvdesktop.MediaItemInfo
+import com.limi.tvdesktop.ServerType
 import android.Manifest
 import android.os.Build
 import android.content.pm.PackageManager
@@ -24,6 +26,45 @@ import java.util.zip.ZipOutputStream
 
 @RunWith(AndroidJUnit4::class)
 class PluginRuntimeInstrumentedTest {
+    @Test fun storagePersistsAcrossSandboxClientsAndRevocationDeniesAccess() { runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val id = "test.lifecycle.${System.nanoTime()}"
+        val source = """
+            globalThis.ABUPlugin = {
+              render() { return {capabilities:[{id:'read',capability:'storage.get',arguments:{key:'name'}}]}; },
+              onAction() { return {capabilities:[{id:'write',capability:'storage.set',arguments:{key:'name',value:'persisted'}}]}; },
+              onCapabilities(input) {
+                const result = input.results[0];
+                return {ui:{type:'text',text:result.ok ? (result.value.value || 'saved') : 'denied'}};
+              }
+            };
+        """.trimIndent()
+        val file = packageFile(context, id, source, extra = """"author":"test","hostApi":">=1.1.0 <2.0.0","permissions":[{"id":"storage","title":"Storage"}],""")
+        val manager = PluginManager.get(context)
+        try {
+            manager.installPackage(file)
+            manager.setEnabled(id, true)
+            val plugin = manager.installed().single { it.id == id }
+            val bridge = PluginCapabilityBridge(context)
+            PluginSandboxClient(context).use { client ->
+                val session = PluginRuntimeSession(plugin, manager, client, bridge)
+                assertTrue(session.invoke("onAction", JSONObject(), requestConsent = { true })?.text == "saved")
+            }
+            // A fresh QuickJS client executes the entry again, so the value must come from host storage.
+            PluginSandboxClient(context).use { client ->
+                val session = PluginRuntimeSession(plugin, manager, client, bridge)
+                assertTrue(session.invoke("render", JSONObject(), requestConsent = { false })?.text == "persisted")
+            }
+            bridge.setConsent(id, "storage", false)
+            PluginSandboxClient(context).use { client ->
+                val session = PluginRuntimeSession(plugin, manager, client, bridge)
+                assertTrue(session.invoke("render", JSONObject(), requestConsent = { true })?.text == "denied")
+            }
+        } finally {
+            manager.uninstall(id)
+            file.delete()
+        }
+    } }
     @Test fun subtitlePluginResultIsValidatedAndAttachedToNativePlayer() { runBlocking {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val id = "test.subtitle.${System.nanoTime()}"
@@ -49,8 +90,14 @@ class PluginRuntimeInstrumentedTest {
             val urls = output!!.getJSONArray("subtitles")
             assertTrue(PluginSubtitleResolver.allowed(plugin, urls.getJSONObject(0).getString("url")))
             assertTrue(!PluginSubtitleResolver.allowed(plugin, urls.getJSONObject(1).getString("url")))
-            val item = playbackMediaItem("https://media.example.com/a.mp4", listOf("https://sub.example.com/caption.vtt"))
-            assertTrue(item.localConfiguration!!.subtitleConfigurations.single().mimeType == "text/vtt")
+            val media = MediaItemInfo("movie", "", ServerType.EMBY, "Test", streamUrl = "https://media.example.com/a.mp4")
+            val resolved = PluginSubtitleResolver.resolve(context, media) { true }
+            assertTrue(resolved.contains("https://sub.example.com/caption.vtt"))
+            assertTrue(!resolved.contains("https://evil.example.com/caption.srt"))
+            val item = playbackMediaItem(media.streamUrl, resolved)
+            assertTrue(item.localConfiguration!!.subtitleConfigurations.any { it.mimeType == "text/vtt" })
+            PluginCapabilityBridge(context).setConsent(id, "network", false)
+            assertTrue(!PluginSubtitleResolver.resolve(context, media) { true }.contains("https://sub.example.com/caption.vtt"))
         } finally {
             manager.uninstall(id)
             file.delete()

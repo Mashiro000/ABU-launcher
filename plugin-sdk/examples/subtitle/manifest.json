@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.subtitle",
+  "name": "Elephants Dream subtitle demo",
+  "version": "1.0.0",
+  "author": "ABU SDK Example",
+  "description": "Demonstrates a bounded subtitle lookup for one public sample film",
+  "kind": "subtitle",
+  "entry": "dist/index.js",
+  "hostApi": ">=1.1.0 <2.0.0",
+  "surfaces": [],
+  "slots": [],
+  "permissions": [{ "id": "network", "title": "加载 Elephants Dream 公共字幕", "sensitive": true }],
+  "networkDomains": ["dash.akamaized.net"],
+  "services": []
+}

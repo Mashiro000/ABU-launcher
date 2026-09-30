@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.sp
 import com.limi.tvdesktop.plugins.InstalledPlugin
 import com.limi.tvdesktop.plugins.PluginManager
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -64,24 +65,28 @@ fun PluginDataSourceBrowser(
     suspend fun load(cursor: String?, search: String) {
         if (loading) return
         loading = true
-        runCatching {
+        try {
             val output = session.invokeOutput(
                 "onDataSource",
                 JSONObject().put("operation", "list").put("query", search).put("cursor", cursor ?: JSONObject.NULL),
                 requestConsent = { request ->
                     val answer = CompletableDeferred<Boolean>()
                     consent = request to answer
-                    answer.await().also { consent = null }
+                    try { answer.await() } finally { consent = null }
                 },
             )
-            PluginDataSource.parse(output.value)
-        }.fold(onSuccess = { page ->
+            val page = PluginDataSource.parse(output.value)
             if (cursor == null) entries.clear()
             entries.addAll(page.items)
             nextCursor = page.nextCursor
             error = null
-        }, onFailure = { error = it.message ?: "加载失败" })
-        loading = false
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            error = failure.message ?: "加载失败"
+        } finally {
+            loading = false
+        }
     }
 
     LaunchedEffect(plugin.id, plugin.version) { load(null, query) }

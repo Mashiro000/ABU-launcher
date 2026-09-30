@@ -2,6 +2,7 @@ package com.limi.tvdesktop.plugins.runtime
 
 import com.limi.tvdesktop.plugins.InstalledPlugin
 import com.limi.tvdesktop.plugins.PluginManager
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -53,6 +54,7 @@ class PluginRuntimeSession(
                     result = if (granted) withContext(Dispatchers.IO) { bridge.execute(plugin, request) }
                     else CapabilityResult.Rejected("用户拒绝系统设备权限")
                 }
+                Log.d("ABUPlugin", "pluginId=${plugin.id} phase=capability:${request.capability} result=${result.javaClass.simpleName}")
                 results.put(JSONObject().put("id", request.id).apply {
                     when (result) {
                         is CapabilityResult.Success -> put("ok", true).put("value", result.value)
@@ -92,8 +94,17 @@ class PluginRuntimeSession(
     }.getOrElse { CapabilityResult.Rejected(it.message ?: "服务调用失败") }
 
     private suspend fun execute(source: String, method: String, input: JSONObject): PluginRuntimeOutput {
-        val json = sandbox.execute(plugin.id, source, method, input.toString()).getOrThrow()
-        return PluginUiParser.parse(json)
+        Log.d("ABUPlugin", "pluginId=${plugin.id} phase=$method result=start")
+        return try {
+            val json = sandbox.execute(plugin.id, source, method, input.toString()).getOrThrow()
+            PluginUiParser.parse(json).also {
+                Log.d("ABUPlugin", "pluginId=${plugin.id} phase=$method result=success")
+            }
+        } catch (error: Exception) {
+            // Never log arguments, returned JSON, exception messages or URLs: they may contain credentials.
+            Log.w("ABUPlugin", "pluginId=${plugin.id} phase=$method result=${error.javaClass.simpleName}")
+            throw error
+        }
     }
 
     companion object { private const val MAX_CAPABILITY_ROUNDS = 4 }

@@ -19,4 +19,4 @@
 | 字幕没有出现 | 确认插件 `kind=subtitle`、已启用、实现 `onSubtitle`，URL 是白名单域名下的 `.srt`/`.vtt`；HLS/DASH 多周期内容对外挂字幕可能有限制 |
 | 蓝牙清单为空或失败 | 此 API 只返回已配对设备；确认系统蓝牙已启用、插件授权通过、Android 12+ 的 `BLUETOOTH_CONNECT` 已允许；不会主动扫描 |
 
-主程序的插件详情和运行失败提示会显示部分错误，但当前还没有专门的开发者日志命令，也没有自动遮盖所有宿主日志中的敏感字段。调试时只分享已脱敏的信息。对于无法从 UI 诊断的问题，可在 Windows/macOS/Linux 用 `adb logcat -d -s PluginRuntime AndroidRuntime TvPlayer` 查看近期运行日志；过滤结果仍需手工删除 URL 中的令牌、账号、设备地址后才能公开。`adb devices` 可先确认设备连接；不要把未脱敏的完整 `logcat` 附在 Issue。
+主程序的插件详情和运行失败提示会显示部分错误。推荐 `npm run logs -- --id <插件ID>`：只输出插件 ID、调用阶段和结果类别；不会输出能力参数或网络正文。生成项目中可直接 `npm run logs`。若必须看原始系统日志，先运行 `adb devices` 确认连接，再用 `adb logcat -d -s ABUPlugin AndroidRuntime TvPlayer`；原始日志可能包含其他系统/播放器信息，发布 Issue 前必须手工删除 URL 中的令牌、账号和设备地址。

@@ -55,6 +55,26 @@ class PluginManagerInstrumentedTest {
         } finally { manager.uninstall(id) }
     }
 
+    @Test fun legacyPackageCanUpgradeAndRollbackButFutureApiIsRejected() {
+        val id = "test.migration.${System.nanoTime()}"
+        val legacy = packageFile(id, "0.03.0")
+        val modern = packageFile(id, "1.1.0", ">=1.1.0 <2.0.0")
+        val future = packageFile(id, "1.2.0", ">=1.2.0 <2.0.0")
+        try {
+            manager.installPackage(legacy)
+            manager.setEnabled(id, true)
+            assertEquals("1.1.0", manager.installPackage(modern).version)
+            assertTrue(manager.installed().single { it.id == id }.enabled)
+            assertThrows(IllegalArgumentException::class.java) { manager.installPackage(future) }
+            assertEquals("1.1.0", manager.installed().single { it.id == id }.version)
+            assertEquals("0.03.0", manager.activateVersion(id, "0.03.0").version)
+            assertEquals("1.1.0", manager.activateVersion(id, "1.1.0").version)
+        } finally {
+            manager.uninstall(id)
+            legacy.delete(); modern.delete(); future.delete()
+        }
+    }
+
     @Test fun rejectsZipPathTraversal() {
         val file = File(context.cacheDir, "bad-${System.nanoTime()}.abu-plugin")
         ZipOutputStream(file.outputStream()).use { zip ->
@@ -145,9 +165,10 @@ class PluginManagerInstrumentedTest {
 
     private fun hex(value: String): ByteArray = value.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 
-    private fun packageFile(id: String, version: String): File {
+    private fun packageFile(id: String, version: String, hostApi: String? = null): File {
         val file = File(context.cacheDir, "$id-$version.abu-plugin")
-        val manifest = """{"schemaVersion":1,"id":"$id","name":"Test","version":"$version","kind":"ui","entry":"dist/index.js"}"""
+        val versionedFields = hostApi?.let { ",\"author\":\"test\",\"hostApi\":\"$it\"" } ?: ""
+        val manifest = """{"schemaVersion":1,"id":"$id","name":"Test","version":"$version","kind":"ui","entry":"dist/index.js"$versionedFields}"""
         ZipOutputStream(file.outputStream()).use { zip ->
             zip.putNextEntry(ZipEntry("manifest.json")); zip.write(manifest.toByteArray()); zip.closeEntry()
             zip.putNextEntry(ZipEntry("dist/index.js")); zip.write("globalThis.ABUPlugin={render(){return {ui:{type:'text',text:'ok'}}}}".toByteArray()); zip.closeEntry()
