@@ -8,17 +8,17 @@ android {
     compileSdkMinor = 1
     defaultConfig {
         applicationId = "com.limi.tvdesktop"
-        minSdk = 28
+        minSdk = 25
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.04-beta.1"
+        versionCode = 5
+        versionName = "0.04-beta.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     splits {
         abi {
             isEnable = true
             reset()
-            include("arm64-v8a", "armeabi-v7a", "x86_64")
+            include("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
             isUniversalApk = true
         }
     }
@@ -55,9 +55,16 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
-    compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+        // java.time / java.nio.file are used by the media and plugin layers.
+        // Desugar them so those paths remain available on Android 7.1 (API 25).
+        isCoreLibraryDesugaringEnabled = true
+    }
 }
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
     androidTestImplementation("androidx.test:runner:1.6.2")
