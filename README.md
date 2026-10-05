@@ -2,7 +2,7 @@
 
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.4.10-purple.svg)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-1.10.4-green.svg)](https://developer.android.com/jetpack/compose)
-[![MinSdk](https://img.shields.io/badge/minSdk-Android%209%20(API%2028)-blue.svg)](https://developer.android.com/about/versions/pie)
+[![MinSdk](https://img.shields.io/badge/minSdk-Android%207.1%20(API%2025)-blue.svg)](https://developer.android.com/about/versions/nougat)
 [![TargetSdk](https://img.shields.io/badge/targetSdk-Android%2015%20(API%2035)-orange.svg)](https://developer.android.com/about/versions/15)
 [![QQ Group](https://img.shields.io/badge/QQ%E4%BA%A4%E6%B5%81%E7%BE%A4-367281933-red.svg)](https://qm.qq.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -32,7 +32,7 @@
   - 媒体卡片展开至电影/剧集详情页的弹性流体过渡（Spring 物理动画与共享时间轴入场动效）。
 - 🌫️ **分代系毛玻璃与渐进模糊**：
   - **Android 13+ (API 33+)**：采用硬件加速的实时渐进式毛玻璃模糊（基于 Haze 1.7.2 渲染真实背景采样与垂直渐变遮罩）。
-  - **Android 9 ~ 12 (API 28~32)**：后台线程降采样高斯模糊平滑降级，确保高中低端电视芯片均能稳定满帧运行。
+  - **Android 7.1 ~ 12 (API 25~32)**：后台线程降采样高斯模糊平滑降级，确保高中低端电视芯片均能稳定满帧运行。
 - 🎬 **本地与远程媒体库支持**：
   - 支持 WebDAV / Alist / Emby / Plex 多源接入与海报墙展示。
   - 主程序默认使用 Android Media3 与系统硬件解码；MPV 作为可按需安装的官方插件，不再增大主安装包。
@@ -102,7 +102,7 @@
 
 ### 运行环境要求
 1. **JDK 17** 及以上
-2. **Android SDK 36.1**（编译使用，最低运行版本依旧为 Android 9）
+2. **Android SDK 36.1**（编译使用，最低运行版本为 Android 7.1 / API 25）
 3. 最新版 **Android Studio** (推荐 Ladybug / Meerkat 或更高版本)
 
 ### 命令行编译
@@ -118,7 +118,7 @@ cd Android
 ./gradlew.bat assembleRelease
 ```
 
-编译成功后会同时生成 `arm64-v8a`、`armeabi-v7a`、`x86_64` 与通用 APK，产物位于：
+编译成功后会同时生成 `arm64-v8a`、`armeabi-v7a`、`x86`、`x86_64` 与通用 APK，产物位于：
 - **Debug 版**：`Android/app/build/outputs/apk/debug/app-debug.apk`
 - **Release 版**：`Android/app/build/outputs/apk/release/`
 
@@ -126,7 +126,7 @@ cd Android
 
 ```bash
 adb connect <电视设备IP>:5555
-adb install -r Android/app/build/outputs/apk/release/app-release.apk
+adb install -r Android/app/build/outputs/apk/release/app-universal-release.apk
 ```
 
 ---
