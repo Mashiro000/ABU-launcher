@@ -1,5 +1,6 @@
 package com.limi.tvdesktop.plugins.runtime
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.Manifest
 import android.bluetooth.BluetoothManager
@@ -105,6 +106,7 @@ class PluginCapabilityBridge(context: Context) {
         return CapabilityResult.Success(JSONObject().put("supported", app.packageManager.hasSystemFeature(PackageManager.FEATURE_USB_HOST)).put("devices", devices))
     }
 
+    @SuppressLint("MissingPermission") // execute() verifies BLUETOOTH_CONNECT on API 31+.
     private fun listBluetooth(): CapabilityResult {
         val adapter = (app.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
         val devices = JSONArray()
