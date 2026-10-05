@@ -96,8 +96,8 @@ internal fun WallpaperSettings(
     Column(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(top = 8.dp, bottom = 48.dp)
+            .settingsVerticalScroll()
+            .padding(top = 28.dp, bottom = 68.dp)
     ) {
         SettingsRowItem(
             label = "← 返回分类",
@@ -311,7 +311,7 @@ private fun WallpaperThumb(
     val hovered by interaction.collectIsHoveredAsState()
     val active = focused || hovered
 
-    val scale by animateFloatAsState(if (active) 1.05f else 1f, tween(180), label = "thumb-scale")
+    val scale by animateFloatAsState(if (active) 1.05f else 1f, focusMotion(), label = "thumb-scale")
     val shape = ContinuousCornerShape(16.dp)
 
     Box(
@@ -334,6 +334,7 @@ private fun WallpaperThumb(
                     true
                 } else false
             }
+            .settingsAutoScroll()
             .focusable(interactionSource = interaction)
             .hoverable(interaction)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)

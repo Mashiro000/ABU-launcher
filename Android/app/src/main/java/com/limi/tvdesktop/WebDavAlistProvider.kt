@@ -171,7 +171,9 @@ class WebDavAlistProvider(override val account: MediaAccount) : MediaSourceProvi
                         durationText = "视频文件",
                         overview = "网盘文件：$name",
                         thumbUrl = item.optString("thumb"),
-                        streamUrl = getStreamUrl(fullPath)
+                        // AList resolves raw URLs through another API call. Defer that request
+                        // until this particular episode is selected for playback.
+                        streamUrl = ""
                     )
                 )
             }

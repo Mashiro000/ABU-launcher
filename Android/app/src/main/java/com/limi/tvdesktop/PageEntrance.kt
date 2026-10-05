@@ -3,7 +3,6 @@ package com.limi.tvdesktop
 import android.os.SystemClock
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -16,12 +15,14 @@ import androidx.compose.ui.unit.dp
 
 private val EntranceEasing = CubicBezierEasing(.16f, 1f, .3f, 1f)
 internal val PageTransitionEasing = CubicBezierEasing(.16f, 1f, .3f, 1f)
-/** Shared focus motion: quick response followed by a soft, non-bouncing settle. */
-internal fun focusMotion() = tween<Float>(if (RenderPerformance.reducedEffects) 100 else 240, easing = CubicBezierEasing(.2f, .8f, .2f, 1f))
-/** A small spring on selection; deselection settles without another bounce. */
-internal fun focusScaleMotion(selected: Boolean): FiniteAnimationSpec<Float> =
-    if (selected && !RenderPerformance.reducedEffects) spring(dampingRatio = .75f, stiffness = 450f, visibilityThreshold = .001f)
-    else focusMotion()
+internal const val PAGE_TRANSITION_MS = 700
+internal const val OVERLAY_TRANSITION_MS = 700
+internal const val SELECTION_TRANSITION_MS = 500
+internal fun pageMotion() = tween<Float>(PAGE_TRANSITION_MS, easing = PageTransitionEasing)
+internal fun overlayMotion() = tween<Float>(OVERLAY_TRANSITION_MS, easing = PageTransitionEasing)
+/** Every focus/option state uses the same 500ms rhythm in both directions. */
+internal fun focusMotion() = tween<Float>(SELECTION_TRANSITION_MS, easing = CubicBezierEasing(.2f, .8f, .2f, 1f))
+internal fun focusScaleMotion(selected: Boolean): FiniteAnimationSpec<Float> = focusMotion()
 private class EntranceRegistry(var visited: MutableState<List<String>>)
 private class EntranceTimeline {
     var elapsed by mutableFloatStateOf(0f)
@@ -58,8 +59,8 @@ internal fun PageEntranceScope(pageKey: String, enabled: Boolean = true, replayO
             } else {
                 if (pageKey !in registry.visited.value) registry.visited.value = registry.visited.value + pageKey
                 val start = SystemClock.uptimeMillis()
-                // All components share elapsed time; their 380ms animations overlap.
-                while (timeline.elapsed < maxOf(2000f, timeline.lastIndex * 35f + 380f)) {
+                // All components share one 700ms page transition timeline.
+                while (timeline.elapsed < timeline.lastIndex * 35f + PAGE_TRANSITION_MS) {
                     withFrameNanos { }
                     timeline.elapsed = (SystemClock.uptimeMillis() - start).toFloat()
                 }
@@ -77,7 +78,7 @@ internal fun Modifier.staggeredEntrance(index: Int): Modifier {
     timeline.lastIndex = maxOf(timeline.lastIndex, index)
     val distance = with(LocalDensity.current) { 20.dp.toPx() }
     return graphicsLayer {
-        val fraction = ((timeline.elapsed - index * 35f) / 380f).coerceIn(0f, 1f)
+        val fraction = ((timeline.elapsed - index * 35f) / PAGE_TRANSITION_MS).coerceIn(0f, 1f)
         val reveal = EntranceEasing.transform(fraction)
         alpha = reveal
         translationY = distance * (1f - reveal)

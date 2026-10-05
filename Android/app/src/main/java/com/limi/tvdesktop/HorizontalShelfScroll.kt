@@ -24,13 +24,13 @@ import kotlin.math.abs
  * instead of a scroll followed by a switch.
  */
 internal val ShelfScrollMotion: AnimationSpec<Float> =
-    tween(2000, easing = CubicBezierEasing(.16f, 1f, .3f, 1f))
+    tween(SELECTION_TRANSITION_MS, easing = CubicBezierEasing(.16f, 1f, .3f, 1f))
 
 /**
  * Holding the key re-targets before the previous leg has settled. A shorter leg keeps
  * the row moving with the repeat rate instead of queueing behind a full-length tween.
  */
-private val ShelfRepeatMotion: AnimationSpec<Float> = tween(110, easing = LinearOutSlowInEasing)
+private val ShelfRepeatMotion: AnimationSpec<Float> = tween(SELECTION_TRANSITION_MS, easing = LinearOutSlowInEasing)
 private const val RepeatWindowNanos = 220_000_000L
 
 internal class ShelfScrollController(

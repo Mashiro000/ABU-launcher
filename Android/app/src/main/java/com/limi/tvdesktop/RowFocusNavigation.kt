@@ -34,7 +34,7 @@ internal data class FocusRowSpec(val id: String, val lazyIndex: Int, val centerO
  * shelf glide, so up/down section moves feel as fluid as left/right card moves.
  */
 internal val RowScrollMotion: AnimationSpec<Float> =
-    tween(2000, easing = CubicBezierEasing(.16f, 1f, .3f, 1f))
+    tween(SELECTION_TRANSITION_MS, easing = CubicBezierEasing(.16f, 1f, .3f, 1f))
 
 /**
  * LazyListState.animateScrollToItem hardcodes a critically-damped spring and exposes no

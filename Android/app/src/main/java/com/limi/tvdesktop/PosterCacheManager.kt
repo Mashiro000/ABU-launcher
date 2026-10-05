@@ -9,6 +9,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -28,10 +30,17 @@ enum class PosterQuality(val displayName: String, val maxHeight: Int) {
 
 object PosterCacheManager {
     private var cacheDir: File? = null
-    private val memoryCache = object : LruCache<String, ImageBitmap>(48 * 1024 * 1024) {
+    // Keep enough decoded artwork for several media shelves plus a detail backdrop. The old
+    // effective budget was especially small because RGB_565 images were counted as RGBA.
+    private val memoryCache = object : LruCache<String, ImageBitmap>(128 * 1024 * 1024) {
         override fun sizeOf(key: String, value: ImageBitmap): Int {
-            return value.width * value.height * 4
+            return value.width * value.height * 2
         }
+    }
+    private val loadLocks = HashMap<String, Mutex>()
+
+    private fun lockFor(key: String): Mutex = synchronized(loadLocks) {
+        loadLocks.getOrPut(key) { Mutex() }
     }
 
     private val unsafeClient: OkHttpClient by lazy {
@@ -81,20 +90,23 @@ object PosterCacheManager {
         memoryCache.get(cacheKey)?.let { return it }
 
         return withContext(Dispatchers.IO) {
+            lockFor(cacheKey).withLock {
+            memoryCache.get(cacheKey)?.let { return@withLock it }
             val diskFile = File(cacheDir, cacheKey)
             if (diskFile.exists() && diskFile.length() > 0) {
                 runCatching {
                     val bitmap = decodeSampledBitmap(diskFile.absolutePath, quality.maxHeight)
                     bitmap?.asImageBitmap()?.also { memoryCache.put(cacheKey, it) }
-                }.getOrNull()?.let { return@withContext it }
+                }.getOrNull()?.let { return@withLock it }
             }
 
             // Fetch from network
             runCatching {
                 val request = Request.Builder().url(url).build()
-                val response = unsafeClient.newCall(request).execute()
-                if (!response.isSuccessful) return@withContext null
-                val bytes = response.body?.bytes() ?: return@withContext null
+                val bytes = unsafeClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@runCatching null
+                    response.body?.bytes() ?: return@runCatching null
+                }
 
                 val targetFile = File(cacheDir, cacheKey)
                 FileOutputStream(targetFile).use { it.write(bytes) }
@@ -102,6 +114,7 @@ object PosterCacheManager {
                 val bitmap = decodeSampledBitmap(targetFile.absolutePath, quality.maxHeight)
                 bitmap?.asImageBitmap()?.also { memoryCache.put(cacheKey, it) }
             }.getOrNull()
+            }
         }
     }
 
@@ -110,12 +123,12 @@ object PosterCacheManager {
         BitmapFactory.decodeFile(path, options)
 
         var sampleSize = 1
-        if (maxHeight > 0 && options.outHeight > maxHeight) {
-            sampleSize = options.outHeight / maxHeight
-        }
+        while (maxHeight > 0 && options.outHeight / (sampleSize * 2) >= maxHeight) sampleSize *= 2
         val decodeOptions = BitmapFactory.Options().apply {
             inSampleSize = sampleSize.coerceAtLeast(1)
-            inPreferredConfig = Bitmap.Config.ARGB_8888
+            // Posters are opaque photographic content. RGB_565 halves texture upload/memory and
+            // removes a major source of GC stalls while rapidly scrolling the media wall.
+            inPreferredConfig = Bitmap.Config.RGB_565
         }
         return BitmapFactory.decodeFile(path, decodeOptions)
     }
@@ -123,11 +136,12 @@ object PosterCacheManager {
 
 @Composable
 fun rememberPosterImage(url: String, placeholder: ImageBitmap? = null): ImageBitmap? {
+    val quality by AccountManager.posterQuality
     // Seed from the memory cache so an already-loaded image never flashes a placeholder first.
-    var image by remember(url) { mutableStateOf(PosterCacheManager.peek(url) ?: placeholder) }
-    LaunchedEffect(url) {
+    var image by remember(url, quality) { mutableStateOf(PosterCacheManager.peek(url, quality) ?: placeholder) }
+    LaunchedEffect(url, quality) {
         if (url.isNotBlank()) {
-            val loaded = PosterCacheManager.loadPoster(url)
+            val loaded = PosterCacheManager.loadPoster(url, quality)
             if (loaded != null) image = loaded
         }
     }

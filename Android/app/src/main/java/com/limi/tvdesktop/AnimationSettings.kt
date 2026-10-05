@@ -37,8 +37,8 @@ internal fun AnimationSettings(
     Column(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(top = 8.dp, bottom = 48.dp)
+            .settingsVerticalScroll()
+            .padding(top = 28.dp, bottom = 68.dp)
     ) {
         SettingsRowItem(
             label = "← 返回分类",
@@ -89,7 +89,7 @@ private fun AnimationPreview(anim: LaunchAnim) {
     val progress = remember { Animatable(0f) }
     LaunchedEffect(anim) {
         progress.snapTo(0f)
-        progress.animateTo(1f, tween(if (anim == LaunchAnim.SYSTEM) 240 else 640, easing = FastOutSlowInEasing))
+        progress.animateTo(1f, tween(PAGE_TRANSITION_MS, easing = FastOutSlowInEasing))
     }
 
     Box(

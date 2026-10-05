@@ -298,7 +298,7 @@ private fun PosterWallCard(
                 contentDescription = media.title,
                 modifier = Modifier
                     .fillMaxSize()
-                    .graphicsLayer { alpha = coverAlpha },
+                    .then(if (coverAlpha < .999f) Modifier.graphicsLayer { alpha = coverAlpha } else Modifier),
                 contentScale = ContentScale.Crop
             )
 

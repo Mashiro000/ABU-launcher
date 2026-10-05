@@ -144,6 +144,7 @@ class PlexProvider(override val account: MediaAccount) : MediaSourceProvider {
                 val viewOffset = obj.optLong("viewOffset", 0L)
                 val thumb = obj.optString("thumb")
                 val thumbUrl = if (thumb.isNotBlank()) "$baseUrl$thumb?X-Plex-Token=${account.token}" else ""
+                val partKey = obj.optJSONArray("Media")?.optJSONObject(0)?.optJSONArray("Part")?.optJSONObject(0)?.optString("key").orEmpty()
 
                 list.add(
                     EpisodeInfo(
@@ -154,7 +155,9 @@ class PlexProvider(override val account: MediaAccount) : MediaSourceProvider {
                         durationText = if (durMs > 0) "${durMs / 60000} 分钟" else "",
                         overview = obj.optString("summary"),
                         thumbUrl = thumbUrl,
-                        streamUrl = getStreamUrl(ratingKey),
+                        // allLeaves already includes Part on normal Plex servers. Never issue a
+                        // separate metadata request for every row in the episode list.
+                        streamUrl = if (partKey.isNotBlank()) "$baseUrl$partKey?X-Plex-Token=${account.token}" else "",
                         playbackPositionMs = viewOffset,
                         durationMs = durMs
                     )

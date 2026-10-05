@@ -19,7 +19,7 @@ internal fun Modifier.focusSweep(selected: Boolean, shape: Shape = Glass): Modif
     val progress = remember { Animatable(0f) }
     LaunchedEffect(selected) {
         progress.snapTo(0f)
-        if (selected) progress.animateTo(1f, tween(500, easing = LinearEasing))
+        if (selected) progress.animateTo(1f, tween(SELECTION_TRANSITION_MS, easing = LinearEasing))
     }
     drawWithContent {
         drawContent()

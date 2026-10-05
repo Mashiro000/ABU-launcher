@@ -4,7 +4,6 @@ import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Image
@@ -40,9 +39,6 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
 
-// One soft spring drives both the pop and the retract, so the scale ratio is identical in and out.
-private val PopSpring = spring<Float>(dampingRatio = .7f, stiffness = 90f)
-
 @Composable
 @OptIn(ExperimentalHazeApi::class)
 internal fun ControlCenter(
@@ -56,8 +52,8 @@ internal fun ControlCenter(
     val blurProgress = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
     var closing by remember { mutableStateOf(false) }
-    val overlayDuration = if (RenderPerformance.reducedEffects) 100 else 280
-    val panelMotion = if (RenderPerformance.reducedEffects) tween<Float>(120) else PopSpring
+    val overlayDuration = OVERLAY_TRANSITION_MS
+    val panelMotion = overlayMotion()
 
     fun close() {
         if (closing) return
@@ -217,10 +213,10 @@ private fun ControlTile(
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     val active = focused || hovered || selected
-    val background by animateColorAsState(if (selected) Color(0xE6F2F2F2) else Color(0x4D2D3239), tween(180), label = "control-background")
-    val foreground by animateColorAsState(if (selected) Color(0xFF111317) else White, tween(180), label = "control-foreground")
+    val background by animateColorAsState(if (selected) Color(0xE6F2F2F2) else Color(0x4D2D3239), tween(SELECTION_TRANSITION_MS), label = "control-background")
+    val foreground by animateColorAsState(if (selected) Color(0xFF111317) else White, tween(SELECTION_TRANSITION_MS), label = "control-foreground")
     val shape = ContinuousCornerShape(if (compact || horizontal) 15.dp else 21.dp)
-    val scale by androidx.compose.animation.core.animateFloatAsState(if (focused) 1.03f else 1f, tween(180), label = "control-scale")
+    val scale by androidx.compose.animation.core.animateFloatAsState(if (focused) 1.03f else 1f, focusMotion(), label = "control-scale")
     Box(modifier
         .graphicsLayer {
             scaleX = scale

@@ -126,7 +126,7 @@ class DemoArtwork(context: Context) {
         BitmapFactory.decodeResource(resources, resId, BitmapFactory.Options().apply { inSampleSize = 2 }).asImageBitmap()
     }
 
-    /** Android 9-12: three separable box passes on a 1/8-size immutable wallpaper. */
+    /** Android 7.1-12: three separable box passes on a 1/8-size immutable wallpaper. */
     fun blurredWallpaper(media: DemoMedia? = null): ImageBitmap {
         val cacheKey = media?.title ?: "__background__"
         blurCache[cacheKey]?.let { return it }

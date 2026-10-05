@@ -151,6 +151,28 @@ object DesktopPreferences {
         }
     }
 
+    enum class AppSort(val label: String, val desc: String) {
+        CUSTOM("自定义排列", "使用桌面编辑保存的手动顺序"),
+        SMART("智能排序", "综合桌面启动频率、最近使用与新安装应用"),
+        INSTALL_NEWEST("安装时间 · 最新优先", "最近安装的应用排在前面"),
+        INSTALL_OLDEST("安装时间 · 最早优先", "最早安装的应用排在前面"),
+        ALPHABETICAL("字母排列", "按应用名称的拼音或字母顺序排列");
+
+        companion object {
+            fun current(context: Context): AppSort {
+                val name = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .getString("appSort", CUSTOM.name) ?: CUSTOM.name
+                return runCatching { valueOf(name) }.getOrDefault(CUSTOM)
+            }
+
+            fun save(context: Context, sort: AppSort) {
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .edit().putString("appSort", sort.name).apply()
+                version++
+            }
+        }
+    }
+
     // 5. 屏幕保护超时
     enum class ScreenSaverTimeout(val label: String, val minutes: Int) {
         OFF("关闭", -1),
@@ -207,6 +229,29 @@ object DesktopPreferences {
         fun set(context: Context, tab: String) {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit().putString("lastTab", tab).apply()
+        }
+    }
+
+    // 9. 启动默认页
+    enum class StartupPage(val label: String, val pageName: String?, val desc: String) {
+        HOME("首页", "首页", "每次启动回到桌面首页"),
+        LIBRARY("媒体库", "媒体库", "每次启动进入媒体库"),
+        LIVE("直播", "直播", "每次启动进入直播"),
+        GAMES("游戏", "游戏", "每次启动进入游戏"),
+        LAST("记住上次", null, "跟随上次停留的页面");
+
+        companion object {
+            fun current(context: Context): StartupPage {
+                val name = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .getString("startupPage", HOME.name) ?: HOME.name
+                return runCatching { valueOf(name) }.getOrDefault(HOME)
+            }
+
+            fun save(context: Context, page: StartupPage) {
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .edit().putString("startupPage", page.name).apply()
+                version++
+            }
         }
     }
 }

@@ -61,8 +61,8 @@ fun MediaLibrarySettings(
     Column(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(top = 12.dp, bottom = 48.dp)
+            .settingsVerticalScroll()
+            .padding(top = 32.dp, bottom = 68.dp)
     ) {
         // Top Header
         Row(
@@ -324,6 +324,7 @@ private fun LibraryPreferenceRow(
             .background(if (focused) Color.White else Color(0x14FFFFFF))
             .border(1.5.dp, if (focused) Color.White else Color(0x22FFFFFF), ContinuousCornerShape(16.dp))
             .clickable(interactionSource = interaction, indication = null) { onToggle(!enabled) }
+            .settingsAutoScroll()
             .focusable(interactionSource = interaction)
             .padding(horizontal = 22.dp, vertical = 17.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -353,6 +354,7 @@ private fun EmbyPlaybackPolicyRow() {
                 val values = AccountManager.EmbyPlaybackPolicy.entries
                 AccountManager.setEmbyPlaybackPolicy(values[(policy.ordinal + 1) % values.size])
             }
+            .settingsAutoScroll()
             .focusable(interactionSource = interaction)
             .padding(horizontal = 22.dp, vertical = 17.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -387,6 +389,7 @@ private fun AccountItemRow(
                 ContinuousCornerShape(16.dp)
             )
             .clickable(interactionSource = interaction, indication = null) { onClick() }
+            .settingsAutoScroll()
             .focusable(interactionSource = interaction)
             .padding(horizontal = 24.dp, vertical = 18.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -480,6 +483,7 @@ private fun ModeOptionCard(
                 ContinuousCornerShape(16.dp)
             )
             .clickable(interactionSource = interaction, indication = null) { onClick() }
+            .settingsAutoScroll()
             .focusable(interactionSource = interaction)
             .padding(20.dp)
     ) {
@@ -526,6 +530,7 @@ private fun TvOptionChip(
                 else Color(0x1EFFFFFF)
             )
             .clickable(interactionSource = interaction, indication = null) { onClick() }
+            .settingsAutoScroll()
             .focusable(interactionSource = interaction)
             .padding(horizontal = 20.dp, vertical = 10.dp)
     ) {
@@ -558,6 +563,7 @@ private fun TvButton(
                 else Color(0x26FFFFFF)
             )
             .clickable(interactionSource = interaction, indication = null) { onClick() }
+            .settingsAutoScroll()
             .focusable(interactionSource = interaction)
             .padding(horizontal = 22.dp, vertical = 12.dp),
         contentAlignment = Alignment.Center

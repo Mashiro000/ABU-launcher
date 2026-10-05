@@ -38,6 +38,13 @@ internal fun launchAppWithClipReveal(context: Context, view: View, bounds: Rect?
     val screenH = targetView.height.takeIf { it > 0 } ?: 1080
     val centerX = bounds?.center?.x?.toInt() ?: (screenW / 2)
     val centerY = bounds?.center?.y?.toInt() ?: (screenH / 2)
+    val launchIntent = Intent(intent).apply {
+        // Android launchers conventionally attach the source icon bounds as well as ActivityOptions.
+        // Some OEM window managers use this rectangle for their own app-opening transition.
+        sourceBounds = bounds?.let {
+            android.graphics.Rect(it.left.toInt(), it.top.toInt(), it.right.toInt(), it.bottom.toInt())
+        }
+    }
 
     val bundle = runCatching {
         when (if (RenderPerformance.reducedEffects) LaunchAnim.SYSTEM else LaunchAnim.current(context)) {
@@ -51,7 +58,9 @@ internal fun launchAppWithClipReveal(context: Context, view: View, bounds: Rect?
                     side, side).toBundle()
             }
             LaunchAnim.ZOOM ->
-                ActivityOptions.makeScaleUpAnimation(targetView, centerX, centerY,
+                ActivityOptions.makeScaleUpAnimation(targetView,
+                    bounds?.left?.toInt() ?: centerX,
+                    bounds?.top?.toInt() ?: centerY,
                     bounds?.width?.toInt() ?: 0, bounds?.height?.toInt() ?: 0).toBundle()
             LaunchAnim.FADE ->
                 ActivityOptions.makeCustomAnimation(context, R.anim.launch_fade_in, 0).toBundle()
@@ -59,13 +68,15 @@ internal fun launchAppWithClipReveal(context: Context, view: View, bounds: Rect?
                 ActivityOptions.makeCustomAnimation(context, R.anim.launch_slide_up, 0).toBundle()
         }
     }.recoverCatching {
-        ActivityOptions.makeScaleUpAnimation(targetView, centerX, centerY,
+        ActivityOptions.makeScaleUpAnimation(targetView,
+            bounds?.left?.toInt() ?: centerX,
+            bounds?.top?.toInt() ?: centerY,
             bounds?.width?.toInt() ?: 0, bounds?.height?.toInt() ?: 0).toBundle()
     }.getOrNull()
 
     runCatching {
-        if (bundle != null) context.startActivity(intent, bundle) else context.startActivity(intent)
+        if (bundle != null) context.startActivity(launchIntent, bundle) else context.startActivity(launchIntent)
     }.onFailure {
-        runCatching { context.startActivity(intent) }
+        runCatching { context.startActivity(launchIntent) }
     }
 }

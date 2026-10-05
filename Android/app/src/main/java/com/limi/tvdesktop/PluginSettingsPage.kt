@@ -10,6 +10,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -32,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -161,7 +163,8 @@ internal fun PluginSettingsPage(onBack: () -> Unit, returnRequester: FocusReques
 
     BackHandler(onBack = onBack)
     LazyColumn(
-        Modifier.fillMaxSize().padding(top = 20.dp, bottom = 80.dp),
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(top = 40.dp, bottom = 100.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
@@ -473,6 +476,7 @@ private fun PluginActionRow(
             .background(if (focused) Color(0x26FFFFFF) else Color(0x0FFFFFFF), RoundedCornerShape(18.dp))
             .border(if (focused) 2.dp else 1.dp, if (focused) accent else Color(0x20FFFFFF), RoundedCornerShape(18.dp))
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .settingsAutoScroll()
             .focusable(interactionSource = interaction)
             .padding(horizontal = 22.dp, vertical = 17.dp),
         verticalAlignment = Alignment.CenterVertically

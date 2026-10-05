@@ -65,9 +65,7 @@ internal fun isDetailMedia(m:DemoMedia)=m.realItem != null || (m !in DemoLibrary
      val sid = real?.seriesId ?: if (real?.mediaType in listOf("Series", "tvshows")) real?.id else null
      if (!sid.isNullOrBlank()) {
          withContext(Dispatchers.IO) {
-             val provider = MediaLibraryManager.getProviderByAccountId(real?.accountId.orEmpty())
-                 ?: AccountManager.accounts.find { it.enabled }?.let { MediaLibraryManager.getProvider(it) }
-             val eps = runCatching { provider?.getEpisodes(sid).orEmpty() }.getOrDefault(emptyList())
+             val eps = MediaLibraryManager.cachedEpisodes(real?.accountId.orEmpty(), sid)
              withContext(Dispatchers.Main) {
                  if (eps.isNotEmpty()) realEpisodes = eps
              }
@@ -85,9 +83,8 @@ internal fun isDetailMedia(m:DemoMedia)=m.realItem != null || (m !in DemoLibrary
  LaunchedEffect(media){
   val r=media.realItem?:return@LaunchedEffect
   withContext(Dispatchers.IO){
-   val provider=MediaLibraryManager.getProviderByAccountId(r.accountId)?:AccountManager.accounts.find{it.enabled}?.let{MediaLibraryManager.getProvider(it)}
-   val d=runCatching{provider?.getItemDetail(r.id)}.getOrNull()
-   val s=runCatching{provider?.getSimilar(r.id).orEmpty()}.getOrDefault(emptyList())
+   val d=MediaLibraryManager.cachedItemDetail(r.accountId,r.id)
+   val s=MediaLibraryManager.cachedSimilar(r.accountId,r.id)
    withContext(Dispatchers.Main){itemDetail=d;similarItems=s}
   }
  }
@@ -134,7 +131,7 @@ internal fun isDetailMedia(m:DemoMedia)=m.realItem != null || (m !in DemoLibrary
  val showMediaInfo=if(isReal)mediaInfoColumns.isNotEmpty() else true
  val castAllFocus=remember{FocusRequester()};val similarAllFocus=remember{FocusRequester()};val seasonFocus=remember{FocusRequester()};val countFocus=remember{FocusRequester()};val allEpisodesFocus=remember{FocusRequester()};
  var target by remember{mutableIntStateOf(0)}; val current by remember{derivedStateOf{if(scroll.firstVisibleItemIndex==0)target else (scroll.firstVisibleItemIndex-1).coerceIn(tabs.indices)}}
- fun close(){if(previewMedia!=null){previewMedia=null;return};if(menu!=null){menu=null;return};if(!exiting){exiting=true;scope.launch{scroll.scrollToItem(0);DetailOrigin.returning=true;launch{snapshotFlow{expansion.value}.collect{DetailOrigin.returnProgress=(1f-it).coerceIn(0f,1f)}};expansion.animateTo(0f,returnMotion());DetailOrigin.returnProgress=1f;DetailOrigin.returning=false;onDismiss(restore)}}}
+ fun close(){if(previewMedia!=null){previewMedia=null;return};if(menu!=null){menu=null;return};if(!exiting){exiting=true;scope.launch{scroll.scrollToItem(0);DetailOrigin.returning=true;launch{snapshotFlow{expansion.value}.collect{DetailOrigin.returnProgress=(1f-it).coerceIn(0f,1f)}};expansion.animateTo(0f,returnMotion());DetailOrigin.returnProgress=1f;withFrameNanos{};DetailOrigin.returning=false;withFrameNanos{};onDismiss(restore)}}}
  val currentClose by rememberUpdatedState({close()})
  DisposableEffect(media){registerClose {currentClose()};onDispose{registerClose(null)}}
  fun go(i:Int){target=i;navigate{scroll.animateScrollToItem(i+1,-with(density){128.dp.roundToPx()});withFrameNanos{};when(tabs[i]){"剧集"->seasonFocus;"演职人员"->castAllFocus;"类似作品"->similarAllFocus;else->infoFocus}.requestFocus()}}
@@ -266,7 +263,7 @@ private fun Modifier.readingFocus():Modifier=composed{
 @Composable
 private fun DPlayButton(label: String, modifier: Modifier, onClick: () -> Unit) {
     var highlighted by remember { mutableStateOf(false) }
-    val reveal by animateFloatAsState(if (highlighted) 1f else 0f, tween(200), label = "detail-play-highlight")
+    val reveal by animateFloatAsState(if (highlighted) 1f else 0f, focusMotion(), label = "detail-play-highlight")
     FocusCard(modifier, 50.dp, onClick, zoomOnFocus = false, onHighlightChanged = { highlighted = it }, borderBlendMode = BlendMode.Overlay, borderOnlyWhenHighlighted = true) {
         Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(
             lerp(Color(0x70484848), Color.White, reveal),

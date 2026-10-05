@@ -438,7 +438,11 @@ fun VideoPlayerScreen(
             if (engineDuration() > 0) {
                 duration = engineDuration()
             }
-            if (useMpv) isPlaying = engineIsPlaying()
+            if (useMpv) {
+                isPlaying = engineIsPlaying()
+                isBuffering = mpvController?.isBuffering ?: true
+                if (isBuffering && bufferingSince <= 0L) bufferingSince = System.currentTimeMillis()
+            }
             if (useMpv && currentPosition >= 1_000L && !engineSuccessRecorded) {
                 PlayerEngineHistory.recordSuccess(context, mediaRoutingKey, PlayerEngineHistory.Engine.MPV)
                 engineSuccessRecorded = true
@@ -848,8 +852,8 @@ fun VideoPlayerScreen(
         // ==========================================
         AnimatedVisibility(
             visible = showControls,
-            enter = fadeIn(tween(200)),
-            exit = fadeOut(tween(250))
+            enter = fadeIn(tween(OVERLAY_TRANSITION_MS)),
+            exit = fadeOut(tween(OVERLAY_TRANSITION_MS))
         ) {
             Box(
                 modifier = Modifier
@@ -863,8 +867,8 @@ fun VideoPlayerScreen(
         // ==========================================
         AnimatedVisibility(
             visible = showControls,
-            enter = fadeIn(tween(200)),
-            exit = fadeOut(tween(250)),
+            enter = fadeIn(tween(OVERLAY_TRANSITION_MS)),
+            exit = fadeOut(tween(OVERLAY_TRANSITION_MS)),
             modifier = Modifier.align(Alignment.TopCenter)
         ) {
             Row(
@@ -982,8 +986,8 @@ fun VideoPlayerScreen(
         // ==========================================
         AnimatedVisibility(
             visible = showControls && showPlaylist,
-            enter = fadeIn(tween(200)),
-            exit = fadeOut(tween(200)),
+            enter = fadeIn(tween(OVERLAY_TRANSITION_MS)),
+            exit = fadeOut(tween(OVERLAY_TRANSITION_MS)),
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(
@@ -1006,8 +1010,8 @@ fun VideoPlayerScreen(
         // ==========================================
         AnimatedVisibility(
             visible = showControls && showDanmakuSettings,
-            enter = fadeIn(tween(200)),
-            exit = fadeOut(tween(200)),
+            enter = fadeIn(tween(OVERLAY_TRANSITION_MS)),
+            exit = fadeOut(tween(OVERLAY_TRANSITION_MS)),
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(
@@ -1039,8 +1043,8 @@ fun VideoPlayerScreen(
         // ==========================================
         AnimatedVisibility(
             visible = showControls && showMediaInfo,
-            enter = fadeIn(tween(200)),
-            exit = fadeOut(tween(200)),
+            enter = fadeIn(tween(OVERLAY_TRANSITION_MS)),
+            exit = fadeOut(tween(OVERLAY_TRANSITION_MS)),
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(
@@ -1053,8 +1057,8 @@ fun VideoPlayerScreen(
 
         AnimatedVisibility(
             visible = showControls && showTrackSettings,
-            enter = fadeIn(tween(200)),
-            exit = fadeOut(tween(200)),
+            enter = fadeIn(tween(OVERLAY_TRANSITION_MS)),
+            exit = fadeOut(tween(OVERLAY_TRANSITION_MS)),
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(
@@ -1098,8 +1102,8 @@ fun VideoPlayerScreen(
 
         AnimatedVisibility(
             visible = showControls && showMoreSettings,
-            enter = fadeIn(tween(200)),
-            exit = fadeOut(tween(200)),
+            enter = fadeIn(tween(OVERLAY_TRANSITION_MS)),
+            exit = fadeOut(tween(OVERLAY_TRANSITION_MS)),
             modifier = Modifier.align(Alignment.TopStart).padding(start = screenWidth * 0.038f, top = screenHeight * 0.13f)
         ) {
             PlayerMoreDrawer(
@@ -1299,8 +1303,8 @@ fun VideoPlayerScreen(
         // ==========================================
         AnimatedVisibility(
             visible = speedOverlayText != null,
-            enter = fadeIn(tween(120)) + scaleIn(tween(120), initialScale = 0.88f),
-            exit = fadeOut(tween(160)),
+            enter = fadeIn(tween(OVERLAY_TRANSITION_MS)) + scaleIn(tween(OVERLAY_TRANSITION_MS), initialScale = 0.88f),
+            exit = fadeOut(tween(OVERLAY_TRANSITION_MS)),
             modifier = Modifier
                 .align(Alignment.Center)
                 .padding(bottom = screenHeight * 0.08f)
@@ -1339,8 +1343,8 @@ fun VideoPlayerScreen(
         // ==========================================
         AnimatedVisibility(
             visible = showControls,
-            enter = fadeIn(tween(220)),
-            exit = fadeOut(tween(220)),
+            enter = fadeIn(tween(OVERLAY_TRANSITION_MS)),
+            exit = fadeOut(tween(OVERLAY_TRANSITION_MS)),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = screenHeight * 0.045f)
