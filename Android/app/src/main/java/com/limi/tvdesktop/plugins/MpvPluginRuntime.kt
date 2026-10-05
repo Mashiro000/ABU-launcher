@@ -9,13 +9,19 @@ object MpvPluginRuntime {
 
     @Volatile private var loaded = false
 
-    fun isInstalled(context: Context): Boolean = resolveNativeDirectory(context) != null
+    // The libmpv wrapper and plugin binaries require Android 8.0. API 25 devices
+    // keep using the built-in Media3 player and never initialize the wrapper.
+    fun isInstalled(context: Context): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && resolveNativeDirectory(context) != null
 
     fun isEnabled(context: Context): Boolean = isInstalled(context) &&
         context.getSharedPreferences("plugin_manager", Context.MODE_PRIVATE)
             .getBoolean("enabled.$PLUGIN_ID", false)
 
     fun ensureLoaded(context: Context) {
+        check(Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            "MPV 播放器插件需要 Android 8.0 或更高版本"
+        }
         if (loaded) return
         synchronized(this) {
             if (loaded) return
