@@ -123,9 +123,46 @@ internal object AppHomeFeatures {
 
     fun saveFolder(context: Context, folder: HomeFolder) {
         val updated = folders(context).filterNot { it.id == folder.id } + folder
+        saveFolders(context, updated)
+    }
+
+    fun saveFolders(context: Context, folders: List<HomeFolder>) {
         val array = JSONArray()
-        updated.forEach { f -> array.put(JSONObject().put("id", f.id).put("name", f.name).put("members", JSONArray(f.members))) }
+        folders.forEach { f -> array.put(JSONObject().put("id", f.id).put("name", f.name).put("members", JSONArray(f.members))) }
         prefs(context).edit().putString("folders", array.toString()).apply()
+    }
+
+    /** Moves keys between folders atomically. Source folders with one app left dissolve. */
+    fun moveIntoFolder(context: Context, targetId: String, keys: List<String>) {
+        val moving = keys.toSet()
+        val current = folders(context)
+        val target = current.firstOrNull { it.id == targetId } ?: return
+        val order = homeOrder(context).toMutableList()
+        val targetKey = "folder.$targetId/$targetId"
+        val targetIndex = order.indexOf(targetKey)
+        val result = buildList {
+            current.forEach { folder ->
+                if (folder.id == targetId) return@forEach
+                val remaining = folder.members.filterNot(moving::contains)
+                val folderKey = "folder.${folder.id}/${folder.id}"
+                when {
+                    remaining.isEmpty() -> order.remove(folderKey)
+                    remaining.size == 1 && folder.members.size > 1 -> {
+                        val index = order.indexOf(folderKey)
+                        if (index >= 0) order[index] = remaining.first()
+                    }
+                    else -> add(folder.copy(members = remaining))
+                }
+            }
+            add(target.copy(members = (target.members + keys).distinct()))
+        }
+        order.removeAll(moving)
+        if (targetIndex >= 0) {
+            order.remove(targetKey)
+            order.add(targetIndex.coerceAtMost(order.size), targetKey)
+        }
+        saveFolders(context, result)
+        saveHomeOrder(context, order)
     }
 
     fun widgets(context: Context): List<HomeWidget> = runCatching {

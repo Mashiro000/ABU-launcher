@@ -37,6 +37,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
@@ -401,6 +402,8 @@ fun TvDesktop() {
     }
     val haze = remember { HazeState() }
     val wallpaperHaze = remember { HazeState() }
+    var homeFolderProgress by remember { mutableFloatStateOf(0f) }
+    val homeFolderBlur = if (page == "首页") (24f * homeFolderProgress).dp else 0.dp
     val glassPrefVersion = DesktopPreferences.version
     val appListBlur = remember(glassPrefVersion) { DesktopPreferences.GlassTuning.appListBlur(context) }
     val appListOpacity = remember(glassPrefVersion) { DesktopPreferences.GlassTuning.appListOpacity(context) }
@@ -570,7 +573,8 @@ fun TvDesktop() {
                 else if (list.firstVisibleItemIndex > 0) 1f
                 else (list.firstVisibleItemScrollOffset / (941f * scale)).coerceIn(0f, 1f)
             }
-            Box(Modifier.align(Alignment.TopCenter).requiredSize(1672.dp, canvasHeight).clipToBoundsCompat().pointerInput(Unit) {
+            Box(Modifier.align(Alignment.TopCenter).requiredSize(1672.dp, canvasHeight)
+                .clipToBoundsCompat().pointerInput(Unit) {
                 awaitPointerEventScope {
                     while (true) {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -601,6 +605,7 @@ fun TvDesktop() {
                     }
                     val currentBlurProgress = { if (page == "媒体库") progress() else if (page == "首页") homeExpandProgress else 0f }
 
+                    Box(Modifier.fillMaxSize().blur(homeFolderBlur)) {
                     if (page == "媒体库") {
                         FollowContentWallpaper(banner, artwork, wallpaperHaze)
                     } else {
@@ -637,6 +642,7 @@ fun TvDesktop() {
                     }
                     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0x08202020), Color(0x0A101010), Color(0xA6101010)))))
                     Canvas(Modifier.fillMaxSize()) { drawRect(Color.Black.copy(alpha = (if (page == "首页") appListOpacity else .72f) * currentBlurProgress())) }
+                    }
                     if (page == "媒体库") {
                         LazyColumn(state = list, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(0.dp)) {
                             item(key = "first-screen") {
@@ -868,12 +874,14 @@ fun TvDesktop() {
                         if (homeOwner != null) {
                             PluginSurfaceHost(homeOwner, "home")
                         } else {
-                            Box(Modifier.fillMaxSize()) {
+                            Box(Modifier.fillMaxSize().zIndex(if (homeFolderProgress > 0.001f) 2f else 0f)) {
                                 HomePage(wallpaperHaze, artwork, legacyBlur, homeDock, homeNav,
                                     onDesktopEdit = { settings = false; settingsPage = true },
                                     onExpandProgress = { homeExpandProgress = it },
+                                    folderBlur = homeFolderBlur,
+                                    onFolderOverlayProgress = { homeFolderProgress = it },
                                     registerReturnToTop = { homeReturnToTop = it })
-                                PluginSlotHost("home.quickActions", Modifier.align(Alignment.TopEnd).padding(top = 132.dp, end = 52.dp).width(420.dp).heightIn(max = 300.dp))
+                                PluginSlotHost("home.quickActions", Modifier.align(Alignment.TopEnd).padding(top = 132.dp, end = 52.dp).width(420.dp).heightIn(max = 300.dp).blur(homeFolderBlur))
                             }
                         }
                     } else {
@@ -885,7 +893,7 @@ fun TvDesktop() {
                     }
                 }
                 // Every first-level page uses this single persistent header instance.
-                Box(Modifier.graphicsLayer {
+                Box(Modifier.blur(homeFolderBlur).graphicsLayer {
                     if (page == "首页") {
                         alpha = (1f - homeExpandProgress).coerceIn(0f, 1f)
                         translationY = -120.dp.toPx() * homeExpandProgress
@@ -1431,6 +1439,7 @@ internal fun FocusCard(
     onReturnRevealChanged: (Float) -> Unit = {},
     forceHighlight: Boolean = false,
     onClickWithBounds: ((Rect) -> Unit)? = null,
+    onVisualBoundsChanged: ((Rect, Rect) -> Unit)? = null,
     content: @Composable BoxScope.() -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -1475,8 +1484,19 @@ internal fun FocusCard(
     var cardCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
     val density = LocalDensity.current
     val shape = ContinuousCornerShape(radius)
+    fun reportVisualBounds(coordinates: LayoutCoordinates) {
+        val base = coordinates.boundsInRoot()
+        if (base.width <= 0f || base.height <= 0f) return
+        val expansionX = if (zoomOnFocus) uniformExpansionDp?.let { with(density) { it.toPx() } * zoomProgress }
+            ?: base.width * .05f * zoomProgress else 0f
+        val expansionY = if (zoomOnFocus) uniformExpansionDp?.let { with(density) { it.toPx() } * zoomProgress }
+            ?: base.height * .05f * zoomProgress else 0f
+        onVisualBoundsChanged?.invoke(base, Rect(base.left - expansionX, base.top - expansionY,
+            base.right + expansionX, base.bottom + expansionY))
+    }
+    SideEffect { cardCoordinates?.takeIf { it.isAttached }?.let(::reportVisualBounds) }
 
-    Box(modifier.onGloballyPositioned { cardCoordinates = it }.zIndex(if (highlight) 2f else if (borderEmphasis > .001f) 1f else 0f).graphicsLayer {
+    Box(modifier.onGloballyPositioned { cardCoordinates = it; reportVisualBounds(it) }.zIndex(if (highlight) 2f else if (borderEmphasis > .001f) 1f else 0f).graphicsLayer {
         if (uniformExpansionDp != null && size.width > 0f && size.height > 0f) {
             val expansionPx = uniformExpansionDp.toPx()
             val maxScaleX = (size.width + 2f * expansionPx) / size.width

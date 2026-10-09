@@ -173,6 +173,44 @@ object DesktopPreferences {
         }
     }
 
+    enum class FolderPageIndicator(val label: String, val desc: String) {
+        DOTS("圆点", "使用圆点显示文件夹页数与当前位置"),
+        BARS("短横条", "使用短横条显示文件夹页数与当前位置");
+
+        companion object {
+            fun current(context: Context): FolderPageIndicator {
+                val name = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .getString("folderPageIndicator", DOTS.name) ?: DOTS.name
+                return runCatching { valueOf(name) }.getOrDefault(DOTS)
+            }
+
+            fun save(context: Context, style: FolderPageIndicator) {
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .edit().putString("folderPageIndicator", style.name).apply()
+                version++
+            }
+        }
+    }
+
+    enum class FolderLaunchBehavior(val label: String, val desc: String) {
+        CLOSE("自动关闭文件夹", "启动应用时收起文件夹，返回桌面后显示原位置"),
+        KEEP_OPEN("保持文件夹展开", "启动应用后保留展开状态，返回桌面可继续选择应用");
+
+        companion object {
+            fun current(context: Context): FolderLaunchBehavior {
+                val name = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .getString("folderLaunchBehavior", CLOSE.name) ?: CLOSE.name
+                return runCatching { valueOf(name) }.getOrDefault(CLOSE)
+            }
+
+            fun save(context: Context, behavior: FolderLaunchBehavior) {
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .edit().putString("folderLaunchBehavior", behavior.name).apply()
+                version++
+            }
+        }
+    }
+
     // 5. 屏幕保护超时
     enum class ScreenSaverTimeout(val label: String, val minutes: Int) {
         OFF("关闭", -1),

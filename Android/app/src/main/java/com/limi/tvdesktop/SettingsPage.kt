@@ -124,6 +124,8 @@ private fun itemsFor(category: SettingsCategory, context: Context): List<Pair<St
         "时钟样式" to DesktopPreferences.ClockStyle.current(context).label,
         "Dock 布局" to DesktopPreferences.DockStyle.current(context).label,
         "网格密度" to DesktopPreferences.GridDensity.current(context).label,
+        "文件夹页码样式" to DesktopPreferences.FolderPageIndicator.current(context).label,
+        "启动文件夹内应用后" to DesktopPreferences.FolderLaunchBehavior.current(context).label,
         "应用排列" to DesktopPreferences.AppSort.current(context).label,
         "隐藏应用管理" to "恢复从桌面隐藏的应用"
     )
@@ -388,6 +390,16 @@ internal fun SettingsPage(
                         onChanged = ::notifyDesktopChanged,
                         returnRequester = leftRequesters[category]
                     )
+                    "folder_indicator" -> FolderIndicatorSettings(
+                        onBack = { backToList() },
+                        onChanged = ::notifyDesktopChanged,
+                        returnRequester = leftRequesters[category]
+                    )
+                    "folder_launch" -> FolderLaunchSettings(
+                        onBack = { backToList() },
+                        onChanged = ::notifyDesktopChanged,
+                        returnRequester = leftRequesters[category]
+                    )
                     "app_sort" -> AppSortSettings(
                         onBack = {
                             backToList()
@@ -444,6 +456,8 @@ internal fun SettingsPage(
                         onClockStyle = { detail = "clock_style" },
                         onDockStyle = { detail = "dock_style" },
                         onGridDensity = { detail = "grid_density" },
+                        onFolderIndicator = { detail = "folder_indicator" },
+                        onFolderLaunch = { detail = "folder_launch" },
                         onAppSort = { detail = "app_sort" },
                         onScreenSaver = { detail = "screensaver" },
                         onMediaLibrary = { detail = "media_library" },
@@ -665,6 +679,8 @@ private fun CategoryItems(
     onClockStyle: () -> Unit,
     onDockStyle: () -> Unit,
     onGridDensity: () -> Unit,
+    onFolderIndicator: () -> Unit,
+    onFolderLaunch: () -> Unit,
     onAppSort: () -> Unit,
     onScreenSaver: () -> Unit,
     onMediaLibrary: () -> Unit,
@@ -764,6 +780,8 @@ private fun CategoryItems(
                 label == "时钟样式" -> onClockStyle
                 label == "Dock 布局" -> onDockStyle
                 label == "网格密度" -> onGridDensity
+                label == "文件夹页码样式" -> onFolderIndicator
+                label == "启动文件夹内应用后" -> onFolderLaunch
                 label == "应用排列" -> onAppSort
                 label == "屏幕保护" -> onScreenSaver
                 label == "默认播放器" -> onPlaybackEngine
@@ -1692,6 +1710,63 @@ internal fun AppSortSettings(
             ) {
                 DesktopPreferences.AppSort.save(context, sort)
                 currentSort = sort
+                onChanged()
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+internal fun FolderIndicatorSettings(
+    onBack: () -> Unit,
+    onChanged: () -> Unit,
+    returnRequester: FocusRequester? = null
+) {
+    val context = LocalContext.current
+    var current by remember { mutableStateOf(DesktopPreferences.FolderPageIndicator.current(context)) }
+    val backRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { backRequester.requestFocus() }
+    Column(Modifier.fillMaxSize().settingsVerticalScroll().padding(top = 28.dp, bottom = 68.dp)) {
+        SettingsRowItem("← 返回分类", null, backRequester, returnRequester, onBack)
+        Spacer(Modifier.height(24.dp))
+        Text("文件夹页码样式", color = White, fontSize = 34.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 6.dp))
+        Text("统一设置文件夹底部的分页位置指示器", color = Color(0xFFA5ACB8), fontSize = 18.sp, modifier = Modifier.padding(bottom = 24.dp))
+        SettingsSectionTitle("指示器样式")
+        DesktopPreferences.FolderPageIndicator.entries.forEach { style ->
+            SettingsRadioRow("${style.label} · ${style.desc}", current == style, leftReturnRequester = returnRequester) {
+                DesktopPreferences.FolderPageIndicator.save(context, style)
+                current = style
+                onChanged()
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+internal fun FolderLaunchSettings(
+    onBack: () -> Unit,
+    onChanged: () -> Unit,
+    returnRequester: FocusRequester? = null
+) {
+    val context = LocalContext.current
+    var current by remember { mutableStateOf(DesktopPreferences.FolderLaunchBehavior.current(context)) }
+    val backRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { backRequester.requestFocus() }
+    Column(Modifier.fillMaxSize().settingsVerticalScroll().padding(top = 28.dp, bottom = 68.dp)) {
+        SettingsRowItem("← 返回分类", null, backRequester, returnRequester, onBack)
+        Spacer(Modifier.height(24.dp))
+        Text("启动文件夹内应用后", color = White, fontSize = 34.sp, fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 6.dp))
+        Text("选择返回桌面时文件夹的状态", color = Color(0xFFA5ACB8), fontSize = 18.sp,
+            modifier = Modifier.padding(bottom = 24.dp))
+        SettingsSectionTitle("文件夹状态")
+        DesktopPreferences.FolderLaunchBehavior.entries.forEach { behavior ->
+            SettingsRadioRow("${behavior.label} · ${behavior.desc}", current == behavior,
+                leftReturnRequester = returnRequester) {
+                DesktopPreferences.FolderLaunchBehavior.save(context, behavior)
+                current = behavior
                 onChanged()
             }
             Spacer(Modifier.height(8.dp))

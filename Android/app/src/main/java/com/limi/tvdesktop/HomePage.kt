@@ -28,6 +28,7 @@ import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateValueAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
@@ -53,7 +54,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.*
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -65,6 +68,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -125,6 +130,10 @@ private data class DockAppSource(
     val launch: Intent
 )
 private data class PendingWidgetBind(val id: Int, val provider: AppWidgetProviderInfo, val width: Int, val height: Int, val configuring: Boolean = false)
+private data class FolderCreateRequest(val app: DockApp, val bounds: Rect)
+private data class OpenFolderRequest(val folder: HomeFolder, val bounds: Rect, val picking: Boolean = false)
+private data class FolderVisualAnchor(val base: Rect, val visual: Rect)
+private data class FolderAddMode(val target: HomeFolder, val targetBounds: Rect)
 private object DockAppCache {
     @Volatile var apps: List<DockApp> = emptyList()
 }
@@ -292,7 +301,7 @@ private fun rememberVisualApp(app: DockApp): DockApp {
             )?.let { processSource(context, it) } ?: app
         }
     }.value
-    return visual.copy(name = app.name, customIcon = app.customIcon)
+    return visual.copy(name = app.name, folder = app.folder, customIcon = app.customIcon)
 }
 
 private fun isValidBanner(drawable: Drawable?): Boolean {
@@ -351,6 +360,8 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
     navigation: FocusRequester,
     onDesktopEdit: () -> Unit = {},
     onExpandProgress: (Float) -> Unit = {},
+    folderBlur: Dp = 0.dp,
+    onFolderOverlayProgress: (Float) -> Unit = {},
     registerReturnToTop: ((() -> Unit)?) -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -389,12 +400,25 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
         val app = iconEditApp
         if (uri != null && app != null && AppHomeFeatures.saveCustomIcon(context, appKey(app), uri)) featureRevision++
     }
-    var folderToOpen by remember { mutableStateOf<HomeFolder?>(null) }
-    var folderPicker by remember { mutableStateOf<HomeFolder?>(null) }
+    var folderToOpen by remember { mutableStateOf<OpenFolderRequest?>(null) }
+    var returningFolderId by remember { mutableStateOf<String?>(null) }
+    val folderAnchors = remember { mutableStateMapOf<String, FolderVisualAnchor>() }
+    var folderLayerReady by remember { mutableStateOf(false) }
+    fun folderSourceHidden(folder: HomeFolder?): Boolean =
+        folderLayerReady && folder != null && folderAnchors.containsKey(folder.id) &&
+            (folderToOpen == null || folderToOpen?.folder?.id == folder.id)
+    fun updateFolderAnchor(folder: HomeFolder?, base: Rect, visual: Rect) {
+        if (folder == null || base.width <= 0f || base.height <= 0f) return
+        val next = FolderVisualAnchor(base, visual)
+        if (folderAnchors[folder.id] != next) folderAnchors[folder.id] = next
+    }
+    var folderAddMode by remember { mutableStateOf<FolderAddMode?>(null) }
+    val stagedFolderKeys = remember { mutableStateListOf<String>() }
+    var stagingCompleting by remember { mutableStateOf(false) }
     var pendingPinApp by remember { mutableStateOf<DockApp?>(null) }
     var pinMode by remember { mutableStateOf<String?>(null) }
     var pinFirstEntry by remember { mutableStateOf("") }
-    var folderAnimation by remember { mutableStateOf<DockApp?>(null) }
+    var folderAnimation by remember { mutableStateOf<FolderCreateRequest?>(null) }
     var widgetOwner by remember { mutableStateOf<DockApp?>(null) }
     var chosenWidgetProvider by remember { mutableStateOf<AppWidgetProviderInfo?>(null) }
     var widgets by remember { mutableStateOf(AppHomeFeatures.widgets(context)) }
@@ -538,8 +562,21 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
     val artworkSize = 80.96.dp * scale
 
     val folders = remember(featureRevision) { AppHomeFeatures.folders(context) }
+    val displayFolders = remember(folders, stagedFolderKeys.toList(), folderAddMode) {
+        if (folderAddMode == null || stagedFolderKeys.isEmpty()) folders else folders.mapNotNull { folder ->
+            if (folder.id == folderAddMode?.target?.id) folder
+            else {
+                val remaining = folder.members.filterNot(stagedFolderKeys::contains)
+                when {
+                    remaining.isEmpty() -> null
+                    remaining.size == 1 && folder.members.size > 1 -> null
+                    else -> folder.copy(members = remaining)
+                }
+            }
+        }
+    }
     val hiddenKeys = remember(featureRevision) { AppHomeFeatures.hidden(context) }
-    val baseHomeEntries = remember(apps, folders, hiddenKeys, featureRevision) {
+    val baseHomeEntries = remember(apps, displayFolders, hiddenKeys, featureRevision, stagedFolderKeys.toList()) {
         val byKey = apps.associateBy { "${it.packageName}/${it.activityName}" }
         fun customized(app: DockApp): DockApp {
             val key = appKey(app)
@@ -548,12 +585,12 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                 customIcon = AppHomeFeatures.customIcon(context, key)
             )
         }
-        val owners = folders.flatMap { folder -> folder.members.map { it to folder } }.toMap()
+        val owners = displayFolders.flatMap { folder -> folder.members.map { it to folder } }.toMap()
         val insertedFolders = mutableSetOf<String>()
         buildList {
             apps.forEach { app ->
                 val key = "${app.packageName}/${app.activityName}"
-                if (key in hiddenKeys) return@forEach
+                if (key in hiddenKeys || key in stagedFolderKeys) return@forEach
                 val owner = owners[key]
                 if (owner != null) {
                     if (insertedFolders.add(owner.id)) {
@@ -562,7 +599,7 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                     }
                 } else add(customized(app))
             }
-            folders.filter { insertedFolders.add(it.id) }.forEach { folder ->
+            displayFolders.filter { insertedFolders.add(it.id) }.forEach { folder ->
                 val first = folder.members.firstNotNullOfOrNull(byKey::get) ?: return@forEach
                 add(customized(first).copy(name = folder.name, folder = folder, packageName = "folder.${folder.id}", activityName = folder.id))
             }
@@ -572,9 +609,19 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
     val homeEntries = remember(baseHomeEntries, appSort, layoutRevision, editOrderKeys) {
         val byKey = baseHomeEntries.associateBy(::appKey)
         val saved = AppHomeFeatures.homeOrder(context)
+        val folderByMember = displayFolders.flatMap { folder -> folder.members.map { it to "folder.${folder.id}/${folder.id}" } }.toMap()
         val canonical = buildList {
-            saved.forEach { key -> byKey[key]?.let { add(it) } }
+            saved.forEach { key -> byKey[key]?.let { add(it) } ?: folderByMember[key]?.let(byKey::get)?.let { folder -> if (none { appKey(it) == appKey(folder) }) add(folder) } }
             baseHomeEntries.forEach { app -> if (none { appKey(it) == appKey(app) }) add(app) }
+        }.toMutableList()
+        folderAddMode?.let { mode ->
+            val key = "folder.${mode.target.id}/${mode.target.id}"
+            val originalIndex = saved.indexOf(key)
+            val currentIndex = canonical.indexOfFirst { appKey(it) == key }
+            if (originalIndex >= 0 && currentIndex >= 0 && currentIndex != originalIndex) {
+                val pinned = canonical.removeAt(currentIndex)
+                canonical.add(originalIndex.coerceAtMost(canonical.size), pinned)
+            }
         }
         val editing = editOrderKeys
         if (editing != null) {
@@ -585,16 +632,18 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
         } else {
             val dock = canonical.take(6)
             val grid = canonical.drop(6)
+            fun sortProxy(app: DockApp): DockApp = app.folder?.members
+                ?.firstNotNullOfOrNull { member -> apps.firstOrNull { appKey(it) == member } } ?: app
             val sortedGrid = when (appSort) {
                 DesktopPreferences.AppSort.CUSTOM -> grid
                 DesktopPreferences.AppSort.ALPHABETICAL -> {
                     val collator = Collator.getInstance(Locale.CHINA)
-                    grid.sortedWith { left, right -> collator.compare(left.name, right.name) }
+                    grid.sortedWith { left, right -> collator.compare(sortProxy(left).name, sortProxy(right).name) }
                 }
                 DesktopPreferences.AppSort.INSTALL_NEWEST,
                 DesktopPreferences.AppSort.INSTALL_OLDEST -> {
                     val times = grid.associateWith { app -> runCatching {
-                        context.packageManager.getPackageInfo(app.packageName, 0).firstInstallTime
+                        context.packageManager.getPackageInfo(sortProxy(app).packageName, 0).firstInstallTime
                     }.getOrDefault(0L) }
                     if (appSort == DesktopPreferences.AppSort.INSTALL_NEWEST) grid.sortedByDescending { times[it] ?: 0L }
                     else grid.sortedBy { times[it] ?: Long.MAX_VALUE }
@@ -602,10 +651,11 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                 DesktopPreferences.AppSort.SMART -> {
                     val now = System.currentTimeMillis()
                     grid.sortedByDescending { app ->
-                        val installedAt = runCatching { context.packageManager.getPackageInfo(app.packageName, 0).firstInstallTime }.getOrDefault(0L)
+                        val proxy = sortProxy(app)
+                        val installedAt = runCatching { context.packageManager.getPackageInfo(proxy.packageName, 0).firstInstallTime }.getOrDefault(0L)
                         val ageDays = ((now - installedAt).coerceAtLeast(0L) / 86_400_000.0)
                         val newBoost = ((14.0 - ageDays).coerceAtLeast(0.0) / 14.0) * 1_000_000.0
-                        val usage = AppHomeFeatures.launchUsage(context, appKey(app))
+                        val usage = AppHomeFeatures.launchUsage(context, appKey(proxy))
                         val recentDays = if (usage.lastUsedAt > 0L) (now - usage.lastUsedAt).coerceAtLeast(0L) / 86_400_000.0 else 365.0
                         newBoost + usage.count * 10_000.0 + (30.0 - recentDays).coerceAtLeast(0.0) * 1_000.0
                     }
@@ -625,6 +675,7 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
     val gridRows = remember(gridApps, columns) { gridApps.chunked(columns) }
 
     val dockRefs = remember(first) { List(6) { if (it == 0) first else FocusRequester() } }
+    val stagingFocusRequester = remember { FocusRequester() }
     val gridRefs = remember(gridRows) {
         gridRows.map { row -> List(row.size) { FocusRequester() } }
     }
@@ -711,8 +762,12 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
         onDispose { registerReturnToTop(null) }
     }
 
-    BackHandler(enabled = expanded || editOrderKeys != null || dockPlacementKey != null || activeMenu != null) {
+    BackHandler(enabled = folderAddMode != null || expanded || editOrderKeys != null || dockPlacementKey != null || activeMenu != null) {
         when {
+            folderAddMode != null -> {
+                if (stagedFolderKeys.isNotEmpty()) stagedFolderKeys.removeAt(stagedFolderKeys.lastIndex)
+                else folderAddMode = null
+            }
             activeMenu != null -> {
                 // 返回只关闭长按菜单（焦点恢复由 menuReturnKey 机制在菜单销毁后完成）
                 val app = activeMenu
@@ -777,8 +832,20 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
 
     fun openEntry(app: DockApp, bounds: Rect? = null) {
         val folder = app.folder
+        val focusedBounds = folder?.let { folderAnchors[it.id]?.visual } ?: bounds ?: Rect.Zero
+        val adding = folderAddMode
+        if (adding != null) {
+            if (folder != null && folder.id != adding.target.id) {
+                folderToOpen = OpenFolderRequest(folder, focusedBounds, picking = true)
+            } else if (folder == null) {
+                val key = appKey(app)
+                if (key !in adding.target.members && key !in stagedFolderKeys) stagedFolderKeys.add(key)
+            }
+            return
+        }
         if (folder != null) {
-            folderToOpen = folder
+            returningFolderId = null
+            folderToOpen = OpenFolderRequest(folder, focusedBounds)
         } else if (appKey(app) in AppHomeFeatures.locked(context)) {
             pendingPinApp = app
             pendingLaunchBounds = bounds
@@ -820,7 +887,8 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
     val dockInitialY = (canvasHeight - dockHeight - 40.dp).coerceAtLeast(40.dp)
     val dockY = dockInitialY - (dockInitialY - dockTargetY) * progress
 
-    Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().zIndex(1f)) {
+    Box(Modifier.fillMaxSize().blur(folderBlur)) {
 
         if (editOrderKeys != null || dockPlacementKey != null) {
             val message = if (editOrderKeys != null) "桌面编辑 · 方向键移动 · OK 保存 · 返回取消"
@@ -904,7 +972,8 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                                 .focusProperties {
                                     up = if (!expanded) navigation else FocusRequester.Default
                                     left = if (index > 0) dockRefs[index - 1] else FocusRequester.Cancel
-                                    right = if (index < 5 && index < dockApps.lastIndex) dockRefs[index + 1] else FocusRequester.Cancel
+                                    right = if (index < 5 && index < dockApps.lastIndex) dockRefs[index + 1]
+                                        else if (folderAddMode != null) stagingFocusRequester else FocusRequester.Cancel
                                 }
                                 .onPreviewKeyEvent { event ->
                                     if (handleEditingKey(event, index)) return@onPreviewKeyEvent true
@@ -958,7 +1027,9 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                             radius = (22.dp * scale).coerceAtLeast(16.dp),
                             showBorder = false,
                             uniformExpansionDp = if (editingKey == appKey(app)) 18.dp else 10.dp,
-                            forceHighlight = forceHighlightKey != null && forceHighlightKey == appKey(app),
+                            forceHighlight = (forceHighlightKey != null && forceHighlightKey == appKey(app)) ||
+                                (app.folder != null && (folderToOpen?.folder?.id == app.folder.id || returningFolderId == app.folder.id)),
+                            onVisualBoundsChanged = { base, visual -> updateFolderAnchor(app.folder, base, visual) },
                             onClick = {},
                             onClickWithBounds = { bounds ->
                                 when {
@@ -968,7 +1039,10 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                                         editOrderKeys = null
                                         editingKey = null
                                     }
-                                    else -> openEntry(app, bounds)
+                                    else -> {
+                                        if (app.folder != null) dockRefs[index].requestFocus()
+                                        openEntry(app, bounds)
+                                    }
                                 }
                             },
                             onLongClick = { bounds -> if (app.folder == null && editOrderKeys == null && dockPlacementKey == null) {
@@ -979,7 +1053,11 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                             } }
                         ) {
                             if (visualApp.folder != null) {
-                                FolderTile(visualApp.folder.members.size, Modifier.fillMaxSize())
+                                DisposableEffect(visualApp.folder.id) {
+                                    onDispose { folderAnchors.remove(visualApp.folder.id) }
+                                }
+                                FolderTile(visualApp.folder, apps, Modifier.fillMaxSize()
+                                    .graphicsLayer { alpha = if (folderSourceHidden(visualApp.folder)) 0f else 1f })
                             } else if (visualApp.customIcon != null) {
                                 Image(visualApp.customIcon, visualApp.name, Modifier.align(Alignment.Center).size(artworkSize), contentScale = ContentScale.Fit)
                             } else if (visualApp.banner != null) {
@@ -1026,15 +1104,21 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                                 if (app != null) {
                                     GridAppItem(
                                         app = app,
+                                        folderAlpha = if (folderSourceHidden(app.folder)) 0f else 1f,
+                                        folderApps = apps,
+                                        onFolderVisualBounds = { base, visual -> updateFolderAnchor(app.folder, base, visual) },
+                                        onFolderDetached = { app.folder?.let { folderAnchors.remove(it.id) } },
                                         iconScale = scale,
                                         editing = editingKey == appKey(app),
-                                        forceHighlight = forceHighlightKey != null && forceHighlightKey == appKey(app),
+                                        forceHighlight = (forceHighlightKey != null && forceHighlightKey == appKey(app)) ||
+                                            (app.folder != null && (folderToOpen?.folder?.id == app.folder.id || returningFolderId == app.folder.id)),
                                         modifier = Modifier.weight(1f),
                                         cardModifier = Modifier
                                             .focusRequester(gridRefs.getOrNull(r)?.getOrNull(col) ?: FocusRequester())
                                             .focusProperties {
                                                 left = if (col > 0) gridRefs.getOrNull(r)?.getOrNull(col - 1) ?: FocusRequester.Cancel else FocusRequester.Cancel
-                                                right = if (col < rowApps.lastIndex) gridRefs.getOrNull(r)?.getOrNull(col + 1) ?: FocusRequester.Cancel else FocusRequester.Cancel
+                                                right = if (col < rowApps.lastIndex) gridRefs.getOrNull(r)?.getOrNull(col + 1) ?: FocusRequester.Cancel
+                                                    else if (folderAddMode != null) stagingFocusRequester else FocusRequester.Cancel
                                                 up = FocusRequester.Cancel
                                                 down = FocusRequester.Cancel
                                             }
@@ -1140,7 +1224,10 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                                                 editOrderKeys?.let(::saveLayout)
                                                 editOrderKeys = null
                                                 editingKey = null
-                                            } else if (dockPlacementKey == null) openEntry(app, bounds)
+                                            } else if (dockPlacementKey == null) {
+                                                if (app.folder != null) gridRefs.getOrNull(r)?.getOrNull(col)?.requestFocus()
+                                                openEntry(app, bounds)
+                                            }
                                         },
                                         onLongClick = { bounds -> if (app.folder == null && editOrderKeys == null && dockPlacementKey == null) {
                                                 suppressMenuOpeningRelease = SystemClock.elapsedRealtime() - lastConfirmKeyDownAt < 1500L
@@ -1190,6 +1277,25 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
             )
         }
 
+        folderAddMode?.let { mode ->
+            val stagedApps = stagedFolderKeys.mapNotNull { key -> apps.firstOrNull { appKey(it) == key } }
+            FolderStagingTray(
+                apps = stagedApps,
+                target = mode.targetBounds.center,
+                completing = stagingCompleting,
+                focusRequester = stagingFocusRequester,
+                onComplete = { stagingCompleting = true },
+                onAnimationFinished = {
+                    AppHomeFeatures.moveIntoFolder(context, mode.target.id, stagedFolderKeys.toList())
+                    stagedFolderKeys.clear()
+                    stagingCompleting = false
+                    folderAddMode = null
+                    featureRevision++
+                },
+                modifier = Modifier.align(Alignment.CenterEnd).padding(end = 30.dp).zIndex(950f)
+            )
+        }
+
         activeMenu?.let { app ->
             AppContextMenu(
                 app = app,
@@ -1220,7 +1326,7 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                 },
                 onCreateFolder = {
                     activeMenu = null
-                    folderAnimation = app
+                    folderAnimation = FolderCreateRequest(app, activeMenuBounds ?: Rect.Zero)
                 },
                 onToggleLock = {
                     val isLocked = appKey(app) in AppHomeFeatures.locked(context)
@@ -1307,47 +1413,107 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
             )
         }
 
-        folderAnimation?.let { app ->
-            FolderCreateAnimation(app, onFinished = {
+        folderAnimation?.let { request ->
+            FolderCreateAnimation(request, onFinished = {
+                val app = request.app
                 val folder = HomeFolder("folder-${System.currentTimeMillis()}", "新建文件夹", listOf(appKey(app)))
                 AppHomeFeatures.saveFolder(context, folder)
+                val folderKey = "folder.${folder.id}/${folder.id}"
+                val order = AppHomeFeatures.homeOrder(context).toMutableList()
+                val sourceIndex = order.indexOf(appKey(app))
+                if (sourceIndex >= 0) order[sourceIndex] = folderKey else {
+                    val visibleIndex = homeEntries.indexOfFirst { appKey(it) == appKey(app) }
+                    val current = homeEntries.map(::appKey).toMutableList()
+                    if (visibleIndex >= 0) current[visibleIndex] = folderKey
+                    order.clear(); order.addAll(current)
+                }
+                AppHomeFeatures.saveHomeOrder(context, order)
                 featureRevision++
-                folderToOpen = folder
                 folderAnimation = null
             }, onDismiss = { folderAnimation = null })
         }
 
-        folderToOpen?.let { folder ->
-            FolderContentsDialog(
-                folder = folder,
-                apps = apps,
-                onDismiss = { folderToOpen = null },
-                onAdd = { folderPicker = folder },
-                onLaunch = { selected ->
+    }
+        FolderMorphHost(
+            entries = (dockApps + gridRows.flatten()).filter { it.folder != null }.distinctBy { it.folder?.id },
+            anchors = folderAnchors,
+            activeRequest = folderToOpen,
+            apps = apps,
+            wallpaperImage = staticBlur,
+            folderBlur = folderBlur,
+            excludedKeys = stagedFolderKeys.toSet(),
+            onReady = { folderLayerReady = true },
+            onProgress = onFolderOverlayProgress,
+            onFolderClick = { app ->
+                val folderId = app.folder?.id
+                if (folderId != null) {
+                    val dockIndex = dockApps.indexOfFirst { it.folder?.id == folderId }
+                    val ref = if (dockIndex >= 0) dockRefs[dockIndex] else {
+                        val gridIndex = gridRows.flatten().indexOfFirst { it.folder?.id == folderId }
+                        if (gridIndex >= 0) gridRefs.getOrNull(gridIndex / columns)?.getOrNull(gridIndex % columns) else null
+                    }
+                    ref?.requestFocus()
+                }
+                openEntry(app, folderId?.let { folderAnchors[it]?.base })
+            },
+            onClosing = { request ->
+                returningFolderId = request.folder.id
+                val dockIndex = dockApps.indexOfFirst { it.folder?.id == request.folder.id }
+                val ref = if (dockIndex >= 0) dockRefs[dockIndex] else {
+                    val gridIndex = gridRows.flatten().indexOfFirst { it.folder?.id == request.folder.id }
+                    if (gridIndex >= 0) gridRefs.getOrNull(gridIndex / columns)?.getOrNull(gridIndex % columns) else null
+                }
+                ref?.requestFocus()
+            },
+            onDismiss = { request ->
+                    folderToOpen = null
+                    onFolderOverlayProgress(0f)
+                    scope.launch {
+                        repeat(20) {
+                            withFrameNanos { }
+                            val dockIndex = dockApps.indexOfFirst { it.folder?.id == request.folder.id }
+                            val ref = if (dockIndex >= 0) dockRefs[dockIndex] else {
+                                val gridIndex = gridRows.flatten().indexOfFirst { it.folder?.id == request.folder.id }
+                                if (gridIndex >= 0) gridRefs.getOrNull(gridIndex / columns)?.getOrNull(gridIndex % columns) else null
+                            }
+                            if (ref != null && runCatching { ref.requestFocus() }.getOrDefault(false)) {
+                                DetailOrigin.retainedFocus = null
+                                returningFolderId = null
+                                return@launch
+                            }
+                        }
+                        DetailOrigin.retainedFocus = null
+                        returningFolderId = null
+                    }
+                },
+            onAdd = { request ->
+                    folderToOpen = null
+                    onFolderOverlayProgress(0f)
+                    DetailOrigin.retainedFocus = null
+                    returningFolderId = null
+                    stagedFolderKeys.clear()
+                    folderAddMode = FolderAddMode(request.folder, request.bounds)
+                },
+            onPick = { selected ->
+                    val key = appKey(selected)
+                    if (key !in stagedFolderKeys) stagedFolderKeys.add(key)
+                },
+            onLaunch = { selected ->
+                    if (DesktopPreferences.FolderLaunchBehavior.current(context) ==
+                        DesktopPreferences.FolderLaunchBehavior.CLOSE) {
+                        folderToOpen = null
+                        onFolderOverlayProgress(0f)
+                        DetailOrigin.retainedFocus = null
+                        returningFolderId = null
+                    }
                     if (appKey(selected) in AppHomeFeatures.locked(context)) {
                         pendingPinApp = selected; pendingLaunchBounds = null; pinMode = "verify_launch"
                     } else {
-                        folderToOpen = null
                         AppHomeFeatures.recordLaunch(context, appKey(selected))
                         launchAppWithClipReveal(context, view, null, selected.launch)
                     }
                 }
-            )
-        }
-        folderPicker?.let { folder ->
-            FolderAppPicker(
-                folder = folder,
-                apps = apps.filter { app -> appKey(app) !in folder.members && appKey(app) !in hiddenKeys },
-                onDismiss = { folderPicker = null },
-                onConfirm = { picked ->
-                    val updated = folder.copy(members = (folder.members + picked).distinct())
-                    AppHomeFeatures.saveFolder(context, updated)
-                    folderToOpen = updated
-                    folderPicker = null
-                    featureRevision++
-                }
-            )
-        }
+        )
         pinMode?.let { mode ->
             PinEntryDialog(mode = mode, onDismiss = { pinMode = null; pendingPinApp = null; pendingLaunchBounds = null }, onSubmit = { value ->
                 val app = pendingPinApp
@@ -1403,6 +1569,10 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
 @Composable
 private fun GridAppItem(
     app: DockApp,
+    folderApps: List<DockApp>,
+    folderAlpha: Float = 1f,
+    onFolderVisualBounds: (Rect, Rect) -> Unit = { _, _ -> },
+    onFolderDetached: () -> Unit = {},
     iconScale: Float = 1f,
     editing: Boolean = false,
     modifier: Modifier = Modifier,
@@ -1412,6 +1582,9 @@ private fun GridAppItem(
     onLongClick: ((Rect) -> Unit)? = null
 ) {
     val visualApp = rememberVisualApp(app)
+    if (visualApp.folder != null) DisposableEffect(visualApp.folder.id) {
+        onDispose(onFolderDetached)
+    }
     var isFocused by remember { mutableStateOf(false) }
     val labelAlpha by animateFloatAsState(
         targetValue = if (isFocused) 1f else 0f,
@@ -1431,12 +1604,14 @@ private fun GridAppItem(
             uniformExpansionDp = if (editing) 18.dp else 10.dp,
             onHighlightChanged = { isFocused = it },
             forceHighlight = forceHighlight,
+            onVisualBoundsChanged = if (visualApp.folder != null) onFolderVisualBounds else null,
             onClick = {},
             onClickWithBounds = onClick,
             onLongClick = onLongClick
         ) {
             if (visualApp.folder != null) {
-                FolderTile(visualApp.folder.members.size, Modifier.fillMaxSize())
+                FolderTile(visualApp.folder, folderApps, Modifier.fillMaxSize()
+                    .graphicsLayer { alpha = folderAlpha })
             } else if (visualApp.banner != null) {
                 Box(Modifier.fillMaxSize().background(Color(visualApp.bannerBgColor)))
                 Image(visualApp.banner, visualApp.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
@@ -1482,11 +1657,81 @@ private fun GridAppItem(
 private fun appKey(app: DockApp) = "${app.packageName}/${app.activityName}"
 
 @Composable
-private fun FolderTile(count: Int, modifier: Modifier = Modifier) {
-    Box(modifier, contentAlignment = Alignment.Center) {
-        LineIcon("folder", Modifier.size(52.dp), Color.White)
-        Text(count.toString(), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold,
-            modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp).background(Color(0xAA30343A), RoundedCornerShape(50)).padding(horizontal = 8.dp, vertical = 2.dp))
+private fun FolderAppVisual(app: DockApp, modifier: Modifier = Modifier, radius: androidx.compose.ui.unit.Dp = 20.dp) {
+    val visual = rememberVisualApp(app)
+    BoxWithConstraints(modifier.clip(RoundedCornerShape(radius)), contentAlignment = Alignment.Center) {
+        val artworkSize = minOf(maxHeight * .61f, maxWidth * .46f)
+        when {
+            visual.customIcon != null -> Image(visual.customIcon, app.name, Modifier.size(artworkSize), contentScale = ContentScale.Fit)
+            visual.banner != null -> Image(visual.banner, app.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            visual.icon != null -> {
+                Box(Modifier.fillMaxSize().background(createBrandGradient(Color(visual.icon.backgroundColor))))
+                DockAppArtwork(visual.icon, app.name, Modifier.size(artworkSize))
+            }
+            else -> LineIcon("grid", Modifier.size(artworkSize), Color.White)
+        }
+    }
+}
+
+@Composable
+private fun FolderPanel(
+    modifier: Modifier,
+    corner: androidx.compose.ui.unit.Dp,
+    cornerY: androidx.compose.ui.unit.Dp? = null,
+    tint: Color,
+    insetX: androidx.compose.ui.unit.Dp,
+    insetY: androidx.compose.ui.unit.Dp,
+    gapX: androidx.compose.ui.unit.Dp,
+    gapY: androidx.compose.ui.unit.Dp,
+    footer: (@Composable () -> Unit)? = null,
+    cell: @Composable (Int, Modifier) -> Unit
+) {
+    Column(modifier.clip(ContinuousCornerShape(corner, cornerY)).background(tint).padding(horizontal = insetX, vertical = insetY)) {
+        FolderGridCells(gapX, gapY, Modifier.weight(1f).fillMaxWidth(), cell)
+        footer?.invoke()
+    }
+}
+
+@Composable
+private fun FolderGridCells(
+    horizontalGap: androidx.compose.ui.unit.Dp,
+    verticalGap: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier,
+    cell: @Composable (Int, Modifier) -> Unit
+) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(verticalGap)) {
+        repeat(3) { row ->
+            Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(horizontalGap)) {
+                repeat(3) { col -> cell(row * 3 + col, Modifier.weight(1f).fillMaxHeight()) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FolderTile(folder: HomeFolder, apps: List<DockApp>, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val members = remember(folder, apps) {
+        val byKey = apps.associateBy(::appKey)
+        folder.members.take(9).map { key ->
+            byKey[key]?.let { app -> app.copy(
+                name = AppHomeFeatures.customLabel(context, key) ?: app.name,
+                customIcon = AppHomeFeatures.customIcon(context, key)
+            ) }
+        }
+    }
+    FolderPanel(
+        modifier = modifier,
+        corner = 22.dp,
+        tint = Color(0xB8DCE4EA),
+        insetX = 24.dp,
+        insetY = 24.dp,
+        gapX = 7.dp,
+        gapY = 7.dp
+    ) { index, cellModifier ->
+        val app = members.getOrNull(index)
+        if (app != null) FolderAppVisual(app, cellModifier)
+        else Spacer(cellModifier)
     }
 }
 
@@ -1992,27 +2237,40 @@ private fun DrawableIcon(drawable: Drawable, modifier: Modifier = Modifier.size(
 }
 
 @Composable
-private fun FolderCreateAnimation(app: DockApp, onFinished: () -> Unit, onDismiss: () -> Unit) {
-    val progress = remember { Animatable(0f) }
-    LaunchedEffect(Unit) { progress.animateTo(1f, overlayMotion()); onFinished() }
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        val dialogView = LocalView.current
-        DisposableEffect(dialogView) {
-            val window = (dialogView.parent as? DialogWindowProvider)?.window
-            window?.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            window?.attributes = window?.attributes?.also { it.dimAmount = .38f }
-            if (Build.VERSION.SDK_INT >= 31) {
-                window?.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
-                window?.setBackgroundBlurRadius(42)
-                window?.attributes = window?.attributes?.also { it.blurBehindRadius = 42 }
-            }
-            onDispose { if (Build.VERSION.SDK_INT >= 31) window?.setBackgroundBlurRadius(0) }
+private fun FolderCreateAnimation(request: FolderCreateRequest, onFinished: () -> Unit, onDismiss: () -> Unit) {
+    val shrink = remember(request) { Animatable(0f) }
+    val folderAlpha = remember(request) { Animatable(0f) }
+    LaunchedEffect(request) {
+        coroutineScope {
+            launch { folderAlpha.animateTo(1f, tween(270)) }
+            shrink.animateTo(1f, spring(dampingRatio = .62f, stiffness = Spring.StiffnessMediumLow))
         }
-        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .32f)), contentAlignment = Alignment.Center) {
-            Box(Modifier.size(330.dp).graphicsLayer { scaleX = .78f + progress.value * .22f; scaleY = .78f + progress.value * .22f }
-                .clip(RoundedCornerShape(42.dp)).background(Color.White.copy(alpha = .14f)).border(2.dp, Color.White.copy(alpha = progress.value), RoundedCornerShape(42.dp)), contentAlignment = Alignment.Center) {
-                LineIcon("folder", Modifier.size(126.dp), Color.White.copy(alpha = progress.value))
-                app.icon?.let { DockAppArtwork(it, app.name, Modifier.size(68.dp).graphicsLayer { scaleX = 1f - .40f*progress.value; scaleY = 1f - .40f*progress.value }) }
+        onFinished()
+    }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        val density = LocalDensity.current
+        val bounds = request.bounds
+        val widthPx = bounds.width.coerceAtLeast(with(density) { 150.dp.toPx() })
+        val heightPx = bounds.height.coerceAtLeast(with(density) { 100.dp.toPx() })
+        val width = with(density) { widthPx.toDp() }
+        val height = with(density) { heightPx.toDp() }
+        val inset = with(density) { 14.dp.toPx() }
+        val gap = with(density) { 7.dp.toPx() }
+        val targetWidth = (widthPx - inset * 2 - gap * 2) / 3f
+        val targetHeight = (heightPx - inset * 2 - gap * 2) / 3f
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .24f * folderAlpha.value))) {
+            Box(Modifier.offset { IntOffset(bounds.left.roundToInt(), bounds.top.roundToInt()) }.size(width, height)) {
+                // Cover the original home card while its moving copy contracts into cell one.
+                Box(Modifier.fillMaxSize().background(Color(0xFF242A31), RoundedCornerShape(22.dp)))
+                FolderTile(HomeFolder("preview", "", emptyList()), emptyList(),
+                    Modifier.fillMaxSize().graphicsLayer { alpha = folderAlpha.value })
+                FolderAppVisual(request.app, Modifier.fillMaxSize().graphicsLayer {
+                    transformOrigin = TransformOrigin(0f, 0f)
+                    translationX = inset * shrink.value
+                    translationY = inset * shrink.value
+                    scaleX = 1f + (targetWidth / widthPx - 1f) * shrink.value
+                    scaleY = 1f + (targetHeight / heightPx - 1f) * shrink.value
+                })
             }
         }
     }
@@ -2084,32 +2342,353 @@ private fun PinEntryDialog(mode: String, onDismiss: () -> Unit, onSubmit: (Strin
     }
 }
 
+private fun folderMorphMotion() = tween<Float>(OVERLAY_TRANSITION_MS, easing = CubicBezierEasing(.4f, 0f, .2f, 1f))
+
+/** The same panel stays mounted at its home position and moves when opened. */
 @Composable
-private fun FolderContentsDialog(folder: HomeFolder, apps: List<DockApp>, onDismiss: () -> Unit, onAdd: () -> Unit, onLaunch: (DockApp) -> Unit) {
-    val members = remember(folder, apps) { folder.members.mapNotNull { key -> apps.firstOrNull { appKey(it) == key } } }
-    HomeDialogSurface(folder.name, "${members.size} 个应用", onDismiss, Modifier.fillMaxWidth(.72f).fillMaxHeight(.72f)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                HomeDialogAction("添加应用", onClick = onAdd, icon = "plus", primary = true)
+private fun FolderMorphHost(
+    entries: List<DockApp>,
+    anchors: Map<String, FolderVisualAnchor>,
+    activeRequest: OpenFolderRequest?,
+    apps: List<DockApp>,
+    wallpaperImage: ImageBitmap?,
+    folderBlur: Dp,
+    excludedKeys: Set<String>,
+    onReady: () -> Unit,
+    onProgress: (Float) -> Unit,
+    onFolderClick: (DockApp) -> Unit,
+    onClosing: (OpenFolderRequest) -> Unit,
+    onDismiss: (OpenFolderRequest) -> Unit,
+    onAdd: (OpenFolderRequest) -> Unit,
+    onPick: (DockApp) -> Unit,
+    onLaunch: (DockApp) -> Unit
+) {
+    val view = LocalView.current
+    val firstDraw = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    var closeActive: (() -> Unit)? = null
+    Box(Modifier.fillMaxSize().drawWithContent {
+        drawContent()
+        if (firstDraw.compareAndSet(false, true)) view.post { onReady() }
+    }) {
+        entries.forEach { entry ->
+            val folder = entry.folder ?: return@forEach
+            val anchor = anchors[folder.id] ?: return@forEach
+            key(folder.id) {
+                val selectedRequest = activeRequest?.takeIf { it.folder.id == folder.id }
+                FolderMorphPanel(
+                    entry = entry,
+                    anchor = anchor,
+                    request = selectedRequest,
+                    coveredByOpenFolder = activeRequest != null && selectedRequest == null,
+                    apps = apps,
+                    wallpaperImage = wallpaperImage,
+                    folderBlur = folderBlur,
+                    excludedKeys = if (selectedRequest != null) excludedKeys else emptySet(),
+                    onProgress = onProgress,
+                    onFolderClick = onFolderClick,
+                    onClosing = onClosing,
+                    onDismiss = onDismiss,
+                    onAdd = onAdd,
+                    onPick = onPick,
+                    onLaunch = onLaunch,
+                    registerClose = { if (selectedRequest != null) closeActive = it }
+                )
             }
-            LazyVerticalGrid(columns = GridCells.Adaptive(170.dp), modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(members.size) { index ->
-                    val app = rememberVisualApp(members[index])
-                    val interaction = remember { MutableInteractionSource() }
-                    val hovered by interaction.collectIsHoveredAsState()
-                    var focused by remember { mutableStateOf(false) }
-                    val reveal by animateFloatAsState(if (hovered || focused) 1f else 0f, focusMotion(), label = "folder-app")
-                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp))
-                        .background(lerp(DialogCard, Color.White, reveal).copy(alpha = .18f + reveal * .72f))
-                        .border(1.dp, Color.White.copy(alpha = .10f + reveal * .25f), RoundedCornerShape(24.dp))
-                        .hoverable(interaction).onFocusChanged { focused = it.isFocused }.focusable()
-                        .clickable(interactionSource = interaction, indication = null) { onLaunch(app) }.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Box(Modifier.size(96.dp).clip(RoundedCornerShape(19.dp)).background(Color.White.copy(alpha = .1f)), contentAlignment = Alignment.Center) {
-                            app.icon?.let { DockAppArtwork(it, app.name, Modifier.size(64.dp)) } ?: LineIcon("grid", Modifier.size(42.dp))
-                        }
-                        Text(app.name, color = if (reveal > .55f) Color(0xFF11151A) else Color.White, fontSize = 17.sp, maxLines = 1, modifier = Modifier.padding(top = 8.dp))
+        }
+        BackHandler(enabled = activeRequest != null) { closeActive?.invoke() }
+    }
+}
+
+@Composable
+private fun FolderMorphPanel(
+    entry: DockApp,
+    anchor: FolderVisualAnchor,
+    request: OpenFolderRequest?,
+    coveredByOpenFolder: Boolean,
+    apps: List<DockApp>,
+    wallpaperImage: ImageBitmap?,
+    folderBlur: Dp,
+    excludedKeys: Set<String>,
+    onProgress: (Float) -> Unit,
+    onFolderClick: (DockApp) -> Unit,
+    onClosing: (OpenFolderRequest) -> Unit,
+    onDismiss: (OpenFolderRequest) -> Unit,
+    onAdd: (OpenFolderRequest) -> Unit,
+    onPick: (DockApp) -> Unit,
+    onLaunch: (DockApp) -> Unit,
+    registerClose: (() -> Unit) -> Unit
+) {
+    val folder = entry.folder ?: return
+    val context = LocalContext.current
+    val members = remember(folder, apps, excludedKeys) {
+        val byKey = apps.associateBy(::appKey)
+        folder.members.filterNot(excludedKeys::contains).mapNotNull { key ->
+            byKey[key]?.let { app -> app.copy(
+                name = AppHomeFeatures.customLabel(context, key) ?: app.name,
+                customIcon = AppHomeFeatures.customIcon(context, key)
+            ) }
+        }
+    }
+    val picking = request?.picking == true
+    val entryCount = members.size + if (picking) 0 else 1
+    val pageCount = ((entryCount + 8) / 9).coerceAtLeast(1)
+    var page by remember(folder.id) { mutableIntStateOf(0) }
+    var focusAfterPage by remember(folder.id) { mutableStateOf<Int?>(null) }
+    val cellFocus = remember(folder.id) { List(9) { FocusRequester() } }
+    val transition = remember(folder.id) { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    var closing by remember(folder.id) { mutableStateOf(false) }
+    val launchBehavior = remember(DesktopPreferences.version) {
+        DesktopPreferences.FolderLaunchBehavior.current(context)
+    }
+    val indicatorStyle = remember(DesktopPreferences.version) { DesktopPreferences.FolderPageIndicator.current(context) }
+    val panelTint = remember(wallpaperImage) {
+        val imageIsLight = wallpaperImage?.asAndroidBitmap()?.let(::sampledBitmapLuminance)?.let { it > .42f }
+        val systemIsLight = if (Build.VERSION.SDK_INT >= 27) runCatching {
+            val color = android.app.WallpaperManager.getInstance(context)
+                .getWallpaperColors(android.app.WallpaperManager.FLAG_SYSTEM)?.primaryColor?.toArgb()
+            color != null && androidx.core.graphics.ColorUtils.calculateLuminance(color) > .5
+        }.getOrDefault(false) else false
+        if (imageIsLight ?: systemIsLight) Color.Black.copy(alpha = .5f) else Color.White.copy(alpha = .5f)
+    }
+    fun close(after: (OpenFolderRequest) -> Unit = onDismiss) {
+        val current = request ?: return
+        if (closing) return
+        closing = true
+        onClosing(current)
+        page = 0
+        scope.launch {
+            withFrameNanos { }
+            transition.animateTo(0f, folderMorphMotion())
+            after(current)
+        }
+    }
+    if (request != null) registerClose { close() }
+    LaunchedEffect(request?.folder?.id) {
+        if (request != null) {
+            closing = false
+            if (entryCount > 0) {
+                withFrameNanos { }
+                runCatching { cellFocus[0].requestFocus() }
+            }
+            transition.animateTo(1f, folderMorphMotion())
+        } else {
+            page = 0
+        }
+    }
+    page = page.coerceIn(0, pageCount - 1)
+    LaunchedEffect(page, focusAfterPage) {
+        val index = focusAfterPage ?: return@LaunchedEffect
+        withFrameNanos { }
+        if (page * 9 + index < entryCount) runCatching { cellFocus[index].requestFocus() }
+        focusAfterPage = null
+    }
+    fun changePage(next: Int, targetCell: Int = 0) {
+        if (next in 0 until pageCount && next != page) {
+            page = next
+            focusAfterPage = targetCell.coerceIn(0, (entryCount - next * 9 - 1).coerceAtMost(8))
+        }
+    }
+    BoxWithConstraints(Modifier.fillMaxSize()
+        .zIndex(if (request != null) 100f else 0f)
+        .graphicsLayer { alpha = if (coveredByOpenFolder) 0f else 1f }
+        .focusProperties { onExit = { if (request != null && !closing) cancelFocusChange() } }
+        .focusGroup()) {
+        val density = LocalDensity.current
+        val source = if (closing) anchor.visual else request?.bounds ?: anchor.visual
+        val startLeft = with(density) { source.left.toDp() }
+        val startTop = with(density) { source.top.toDp() }
+        val startWidth = with(density) { source.width.toDp() }.coerceAtLeast(1.dp)
+        val startHeight = with(density) { source.height.toDp() }.coerceAtLeast(1.dp)
+        val baseWidth = with(density) { anchor.base.width.toDp() }.coerceAtLeast(1.dp)
+        val baseHeight = with(density) { anchor.base.height.toDp() }.coerceAtLeast(1.dp)
+        val focusScaleX = startWidth / baseWidth
+        val focusScaleY = startHeight / baseHeight
+        val aspect = (baseWidth / baseHeight).coerceIn(1.2f, 2.4f)
+        val targetWidth = minOf(maxWidth * .68f, maxHeight * .76f * aspect, 780.dp) * .9f
+        val targetHeight = targetWidth / aspect
+        val targetLeft = (maxWidth - targetWidth) / 2
+        val targetTop = (maxHeight - targetHeight) / 2
+        val p = transition.value
+        SideEffect { if (request != null) onProgress(p) }
+        val currentWidth = startWidth + (targetWidth - startWidth) * p
+        val currentHeight = startHeight + (targetHeight - startHeight) * p
+        val cornerX = 22.dp * focusScaleX + (30.dp - 22.dp * focusScaleX) * p
+        val cornerY = 22.dp * focusScaleY + (30.dp - 22.dp * focusScaleY) * p
+        val insetX = 24.dp * focusScaleX + (24.dp - 24.dp * focusScaleX) * p
+        val insetY = 24.dp * focusScaleY + (24.dp - 24.dp * focusScaleY) * p
+        val gapX = 7.dp * focusScaleX + (20.dp - 7.dp * focusScaleX) * p
+        val gapY = 7.dp * focusScaleY + (20.dp - 7.dp * focusScaleY) * p
+        val cellCorner = 20.dp * ((focusScaleX + focusScaleY) / 2f) +
+            (20.dp - 20.dp * ((focusScaleX + focusScaleY) / 2f)) * p
+        if (request != null) Box(Modifier.fillMaxSize()
+            .background(Color.Black.copy(alpha = .13f * p))
+            .pointerInput(folder.id) { detectTapGestures(onTap = { close() }) })
+        FolderPanel(
+            modifier = Modifier.offset(x = startLeft + (targetLeft - startLeft) * p,
+                    y = startTop + (targetTop - startTop) * p)
+                .size(currentWidth, currentHeight)
+                .then(if (request == null && !coveredByOpenFolder) Modifier.pointerInput(folder.id) {
+                    detectTapGestures(onTap = { onFolderClick(entry) })
+                } else if (request != null) Modifier.pointerInput(pageCount, page) {
+                    var swipeDistance = 0f
+                    detectHorizontalDragGestures(onDragCancel = { swipeDistance = 0f }, onDragEnd = {
+                        if (swipeDistance < -60f) changePage(page + 1)
+                        if (swipeDistance > 60f) changePage(page - 1)
+                        swipeDistance = 0f
+                    }) { change, amount ->
+                        change.consume()
+                        swipeDistance += amount
+                    }
+                } else Modifier),
+            corner = cornerX,
+            cornerY = cornerY,
+            tint = lerp(Color(0xB8DCE4EA), panelTint, p),
+            insetX = insetX,
+            insetY = insetY,
+            gapX = gapX,
+            gapY = gapY,
+            footer = {
+                Box(Modifier.fillMaxWidth().height(0.dp)) {
+                    Box(Modifier.align(Alignment.TopCenter).offset(y = 6.dp).graphicsLayer { alpha = p }) {
+                        FolderPageIndicator(page, pageCount, indicatorStyle)
                     }
                 }
             }
+        ) { cell, cellModifier ->
+            val row = cell / 3
+            val col = cell % 3
+            val globalIndex = page * 9 + cell
+            val app = members.getOrNull(globalIndex)
+            val isAdd = !picking && globalIndex == members.size
+            if (app == null && !isAdd) {
+                Spacer(cellModifier)
+            } else {
+                var focused by remember(folder.id, cell) { mutableStateOf(false) }
+                val canFocusCell = request != null && !closing
+                val activateCell = {
+                    if (isAdd) close(onAdd)
+                    else if (app != null && picking) onPick(app)
+                    else if (app != null && launchBehavior == DesktopPreferences.FolderLaunchBehavior.KEEP_OPEN) onLaunch(app)
+                    else if (app != null) close { onLaunch(app) }
+                }
+                val zoom by animateFloatAsState(if (focused && canFocusCell) 1.08f else 1f,
+                    focusScaleMotion(focused && canFocusCell), label = "folder-cell-focus")
+                Box(cellModifier
+                    .graphicsLayer {
+                        alpha = if (isAdd) p else 1f
+                        scaleX = zoom; scaleY = zoom
+                    }
+                    .focusRequester(cellFocus[cell])
+                    .focusProperties { canFocus = canFocusCell }
+                    .onFocusChanged { focused = it.isFocused }
+                    .onPreviewKeyEvent { event ->
+                        if (event.type != KeyEventType.KeyDown) false
+                        else when {
+                            canFocusCell && (event.key == Key.Enter || event.key == Key.NumPadEnter ||
+                                event.key == Key.DirectionCenter || event.key == Key.Spacebar) -> {
+                                activateCell(); true
+                            }
+                            event.key == Key.DirectionRight && col == 2 && page < pageCount - 1 -> { changePage(page + 1, row * 3); true }
+                            event.key == Key.DirectionLeft && col == 0 && page > 0 -> { changePage(page - 1, row * 3 + 2); true }
+                            else -> false
+                        }
+                    }
+                    .clickable(enabled = canFocusCell, indication = null,
+                        interactionSource = remember { MutableInteractionSource() }) {
+                        activateCell()
+                    }
+                    .clip(RoundedCornerShape(cellCorner))) {
+                    if (isAdd) {
+                        Box(Modifier.fillMaxSize().background(Color.White), contentAlignment = Alignment.Center) {
+                            Canvas(Modifier.size(28.dp)) {
+                                val center = Offset(size.width / 2f, size.height / 2f)
+                                val half = 9.dp.toPx()
+                                val stroke = 2.dp.toPx()
+                                drawLine(Color.Black, Offset(center.x - half, center.y), Offset(center.x + half, center.y), stroke, cap = StrokeCap.Round)
+                                drawLine(Color.Black, Offset(center.x, center.y - half), Offset(center.x, center.y + half), stroke, cap = StrokeCap.Round)
+                            }
+                        }
+                    } else if (app != null) FolderAppVisual(app, Modifier.fillMaxSize(), cellCorner)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FolderPageIndicator(page: Int, count: Int, style: DesktopPreferences.FolderPageIndicator, modifier: Modifier = Modifier) {
+    if (count <= 1) { Spacer(modifier.height(14.dp)); return }
+    Row(modifier.height(14.dp), horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
+        repeat(count) { index ->
+            val active = index == page
+            Box(Modifier
+                .width(if (style == DesktopPreferences.FolderPageIndicator.BARS) 22.dp else if (active) 10.dp else 8.dp)
+                .height(if (style == DesktopPreferences.FolderPageIndicator.BARS) 4.dp else if (active) 10.dp else 8.dp)
+                .clip(RoundedCornerShape(50))
+                .background(Color.White.copy(alpha = if (active) 1f else .42f)))
+        }
+    }
+}
+
+@Composable
+private fun FolderStagingTray(
+    apps: List<DockApp>,
+    target: Offset,
+    completing: Boolean,
+    focusRequester: FocusRequester,
+    onComplete: () -> Unit,
+    onAnimationFinished: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var focused by remember { mutableStateOf(false) }
+    val progress = remember { Animatable(0f) }
+    LaunchedEffect(completing) {
+        if (completing) {
+            progress.snapTo(0f)
+            progress.animateTo(1f, tween(520, easing = PageTransitionEasing))
+            onAnimationFinished()
+        }
+    }
+    val expandedHeight = (apps.size.coerceAtLeast(1) * 66 + 58).coerceAtMost(510).dp
+    Column(
+        modifier.onFocusChanged { focused = it.hasFocus }
+            .clip(RoundedCornerShape(24.dp))
+            .background(Color(0xD91A2027))
+            .border(1.dp, Color.White.copy(alpha = .22f), RoundedCornerShape(24.dp))
+            .padding(10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Box(Modifier.width(78.dp).height(if (focused) expandedHeight - 58.dp else 78.dp)) {
+            apps.forEachIndexed { index, app ->
+                var center by remember(appKey(app)) { mutableStateOf(Offset.Zero) }
+                val delay = (index.coerceAtMost(12) * .035f)
+                val localProgress = ((progress.value - delay) / (1f - delay)).coerceIn(0f, 1f)
+                FolderAppVisual(app, Modifier.size(62.dp)
+                    .offset(y = if (focused) (index * 66).dp else (index.coerceAtMost(5) * 3).dp)
+                    .zIndex(index.toFloat())
+                    .onGloballyPositioned { center = it.boundsInRoot().center }
+                    .graphicsLayer {
+                        translationX = (target.x - center.x) * localProgress
+                        translationY = (target.y - center.y) * localProgress
+                        scaleX = 1f - .72f * localProgress
+                        scaleY = scaleX
+                        alpha = 1f - .15f * localProgress
+                    })
+            }
+        }
+        val interaction = remember { MutableInteractionSource() }
+        var doneFocused by remember { mutableStateOf(false) }
+        Text("完成", color = if (apps.isNotEmpty()) Color.White else Color.White.copy(alpha = .35f), fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.clip(RoundedCornerShape(13.dp))
+                .background(if (doneFocused) Color(0xFF568DB1) else Color(0xFF313A44))
+                .focusRequester(focusRequester)
+                .hoverable(interaction, apps.isNotEmpty()).onFocusChanged { doneFocused = it.isFocused }
+                .focusable(apps.isNotEmpty())
+                .clickable(interactionSource = interaction, indication = null, enabled = apps.isNotEmpty() && !completing, onClick = onComplete)
+                .padding(horizontal = 16.dp, vertical = 9.dp))
     }
 }
 
