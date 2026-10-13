@@ -1,5 +1,7 @@
 package com.limi.tvdesktop.player
 
+import com.limi.tvdesktop.SELECTION_TRANSITION_MS
+
 import com.limi.tvdesktop.RenderPerformance
 
 import android.os.Build
@@ -106,7 +108,7 @@ fun TvCircleIconButton(
 
     val scale by animateFloatAsState(
         targetValue = if (isFocused) 1.12f else 1.0f,
-        animationSpec = tween(durationMillis = 140),
+        animationSpec = tween(durationMillis = SELECTION_TRANSITION_MS),
         label = "button_scale"
     )
 
@@ -118,7 +120,7 @@ fun TvCircleIconButton(
             isPrimary -> Color(0x663D75D9) // 40% 不透明
             else -> Color(0x66202436)      // 40% 不透明
         },
-        animationSpec = tween(durationMillis = 140),
+        animationSpec = tween(durationMillis = SELECTION_TRANSITION_MS),
         label = "button_bg"
     )
 
@@ -128,7 +130,7 @@ fun TvCircleIconButton(
             isPrimary -> Color(0xFFE8EFFF)
             else -> Color(0xEEFFFFFF)
         },
-        animationSpec = tween(durationMillis = 140),
+        animationSpec = tween(durationMillis = SELECTION_TRANSITION_MS),
         label = "button_icon"
     )
 
@@ -207,13 +209,13 @@ fun TvSwitch(
 
     val scale by animateFloatAsState(
         targetValue = if (isFocused) 1.10f else 1.0f,
-        animationSpec = tween(140),
+        animationSpec = tween(SELECTION_TRANSITION_MS),
         label = "switch_scale"
     )
 
     val thumbOffset by animateFloatAsState(
         targetValue = if (checked) 1.0f else 0.0f,
-        animationSpec = tween(160),
+        animationSpec = tween(SELECTION_TRANSITION_MS),
         label = "thumb_offset"
     )
 
@@ -224,7 +226,7 @@ fun TvSwitch(
             isFocused -> Color(0x4DFFFFFF)
             else -> Color(0x28FFFFFF)
         },
-        animationSpec = tween(140),
+        animationSpec = tween(SELECTION_TRANSITION_MS),
         label = "track_color"
     )
 
@@ -290,7 +292,7 @@ fun TvSlider(
 
     val scale by animateFloatAsState(
         targetValue = if (isFocused) 1.06f else 1.0f,
-        animationSpec = tween(140),
+        animationSpec = tween(SELECTION_TRANSITION_MS),
         label = "slider_scale"
     )
 
@@ -381,13 +383,13 @@ fun TvCapsuleSelector(
 
     val scale by animateFloatAsState(
         targetValue = if (isFocused) 1.08f else 1.0f,
-        animationSpec = tween(140),
+        animationSpec = tween(SELECTION_TRANSITION_MS),
         label = "capsule_scale"
     )
 
     val bgColor by animateColorAsState(
         targetValue = if (isFocused) Color(0xCC4E74B0) else Color(0x66202436),
-        animationSpec = tween(140),
+        animationSpec = tween(SELECTION_TRANSITION_MS),
         label = "capsule_bg"
     )
 
@@ -452,13 +454,13 @@ fun TvTimelineScrubber(
 
     val trackHeight by animateDpAsState(
         targetValue = if (isFocused) 12.dp else 8.dp,
-        animationSpec = tween(140),
+        animationSpec = tween(SELECTION_TRANSITION_MS),
         label = "track_height"
     )
 
     val thumbRadius by animateDpAsState(
         targetValue = if (isFocused) 12.dp else 9.dp,
-        animationSpec = tween(140),
+        animationSpec = tween(SELECTION_TRANSITION_MS),
         label = "thumb_radius"
     )
 

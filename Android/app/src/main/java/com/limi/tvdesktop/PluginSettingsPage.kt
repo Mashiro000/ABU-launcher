@@ -3,6 +3,7 @@ package com.limi.tvdesktop
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,19 +11,23 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.runtime.Composable
@@ -32,11 +37,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -61,7 +71,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 @Composable
-internal fun PluginSettingsPage(onBack: () -> Unit, returnRequester: FocusRequester?) {
+internal fun PluginSettingsPage(onBack: () -> Unit, returnRequester: FocusRequester?, initialPluginId: String? = null, embedded: Boolean = false, storeOnly: Boolean = false) {
     val context = LocalContext.current
     val manager = remember { PluginManager.get(context) }
     var refresh by remember { mutableIntStateOf(0) }
@@ -72,6 +82,7 @@ internal fun PluginSettingsPage(onBack: () -> Unit, returnRequester: FocusReques
     var repositoryEditor by remember { androidx.compose.runtime.mutableStateOf<com.limi.tvdesktop.plugins.PluginRepository?>(null) }
     var addingRepository by remember { androidx.compose.runtime.mutableStateOf(false) }
     val plugins = remember(refresh) { manager.installed() }
+    LaunchedEffect(initialPluginId) { selectedPlugin = plugins.firstOrNull { it.id == initialPluginId } }
     val backRequester = remember { FocusRequester() }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     val repositoryClient = remember { PluginRepositoryClient(context) }
@@ -90,7 +101,7 @@ internal fun PluginSettingsPage(onBack: () -> Unit, returnRequester: FocusReques
             remotePlugins = found.distinctBy { "${it.id}@${it.version}" }
             status = when {
                 found.isNotEmpty() -> "发现 ${found.size} 个可用插件"
-                errors.isNotEmpty() -> "仓库检查失败：${errors.joinToString("；")}" 
+                errors.isNotEmpty() -> "仓库检查失败：${errors.joinToString("；")}"
                 else -> "仓库中暂无插件"
             }
         }
@@ -131,7 +142,7 @@ internal fun PluginSettingsPage(onBack: () -> Unit, returnRequester: FocusReques
 
     LaunchedEffect(Unit) {
         backRequester.requestFocus()
-        refreshRepositories()
+        if (initialPluginId == null) refreshRepositories()
     }
 
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -160,8 +171,13 @@ internal fun PluginSettingsPage(onBack: () -> Unit, returnRequester: FocusReques
     }
 
     BackHandler(onBack = onBack)
+    val childOpen = selectedPlugin != null || pendingInstall != null || addingRepository || repositoryEditor != null
+    val baseOffset by animateFloatAsState(if (childOpen) -1f else 0f,
+        tween(RenderPerformance.duration(240)), label = "plugin-parent-slide")
     LazyColumn(
-        Modifier.fillMaxSize().padding(top = 20.dp, bottom = 80.dp),
+        Modifier.fillMaxSize().graphicsLayer { translationX = size.width * baseOffset }
+            .focusProperties { onEnter = { if (childOpen) cancelFocusChange() } }.focusGroup(),
+        contentPadding = PaddingValues(top = 40.dp, bottom = 100.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
@@ -172,7 +188,7 @@ internal fun PluginSettingsPage(onBack: () -> Unit, returnRequester: FocusReques
                 onClick = onBack
             )
             Spacer(Modifier.height(20.dp))
-            Text("插件", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Bold)
+            Text(if (storeOnly) "插件商店" else "插件管理", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Bold)
             Text(
                 "插件默认关闭；敏感能力会在首次使用时再次征求授权",
                 color = Color(0xFFA5ACB8),
@@ -187,6 +203,10 @@ internal fun PluginSettingsPage(onBack: () -> Unit, returnRequester: FocusReques
             )
         }
 
+        if (!storeOnly) {
+        item { PluginActionRow("从本地导入插件", "安装离线 .abu-plugin 文件", onClick = {
+            importLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
+        }) }
         if (plugins.isEmpty()) {
             item {
                 PluginActionRow(
@@ -204,7 +224,8 @@ internal fun PluginSettingsPage(onBack: () -> Unit, returnRequester: FocusReques
             }
         }
 
-        item {
+        }
+        if (storeOnly) item {
             SettingsSectionTitle("插件来源")
             PluginActionRow(
                 title = "检查插件仓库",
@@ -256,7 +277,7 @@ internal fun PluginSettingsPage(onBack: () -> Unit, returnRequester: FocusReques
 
     pendingInstall?.let { plugin ->
         val sensitive = plugin.permissions.filter { it.sensitive }
-        AlertDialog(
+        SettingsConfirmationPage(
             onDismissRequest = { pendingInstall = null },
             title = { Text(if (plugin.official) "安装官方插件" else "安装第三方插件") },
             text = {
@@ -288,6 +309,7 @@ internal fun PluginSettingsPage(onBack: () -> Unit, returnRequester: FocusReques
                 selectedPlugin = manager.installed().firstOrNull { it.id == plugin.id }
             },
             onDismiss = { selectedPlugin = null },
+            embedded = embedded,
         )
     }
     if (addingRepository) RepositoryAddDialog(
@@ -300,7 +322,7 @@ internal fun PluginSettingsPage(onBack: () -> Unit, returnRequester: FocusReques
         },
     )
     repositoryEditor?.let { repository ->
-        AlertDialog(
+        SettingsConfirmationPage(
             onDismissRequest = { repositoryEditor = null },
             title = { Text(repository.name) },
             text = { Text(repository.indexUrl) },
@@ -324,7 +346,7 @@ internal fun PluginSettingsPage(onBack: () -> Unit, returnRequester: FocusReques
 private fun RepositoryAddDialog(onDismiss: () -> Unit, onAdd: (String, String) -> Unit) {
     var name by remember { androidx.compose.runtime.mutableStateOf("") }
     var url by remember { androidx.compose.runtime.mutableStateOf("") }
-    AlertDialog(
+    SettingsConfirmationPage(
         onDismissRequest = onDismiss,
         title = { Text("添加第三方仓库") },
         text = {
@@ -348,6 +370,7 @@ private fun InstalledPluginRow(plugin: InstalledPlugin, onOpen: () -> Unit, onTo
     }
     PluginActionRow(
         title = plugin.name,
+        icon = plugin.name.take(1).uppercase(),
         subtitle = "${plugin.kind.name.lowercase()} · v${plugin.version} · $trust · ${formatBytes(plugin.installedBytes)}",
         trailing = {
             Switch(checked = plugin.enabled, onCheckedChange = { onToggle() })
@@ -362,6 +385,7 @@ private fun PluginDetailDialog(
     manager: PluginManager,
     onChanged: () -> Unit,
     onDismiss: () -> Unit,
+    embedded: Boolean = false,
 ) {
     val context = LocalContext.current
     val client = remember { PluginSandboxClient(context) }
@@ -389,11 +413,16 @@ private fun PluginDetailDialog(
             )
         }
     }
-    AlertDialog(
+    PluginDetailsSurface(
+        embedded = embedded,
         onDismissRequest = onDismiss,
         title = { Text("${plugin.name}  v${plugin.version}") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SettingsRowItem("启用插件", if (plugin.enabled) "已启用" else "已停用") {
+                    manager.setEnabled(plugin.id, !plugin.enabled)
+                    onChanged()
+                }
                 Text(plugin.description.ifBlank { "暂无说明" })
                 Text("作者：${plugin.author} · ${plugin.trust.name.lowercase()}", fontSize = 13.sp)
                 if (plugin.permissions.isEmpty()) Text("权限：无", fontSize = 13.sp) else {
@@ -441,7 +470,7 @@ private fun PluginDetailDialog(
         confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
         dismissButton = { TextButton(onClick = { confirmUninstall = true }) { Text("卸载", color = Color(0xFFFF8A80)) } },
     )
-    if (confirmUninstall) AlertDialog(
+    if (confirmUninstall) SettingsConfirmationPage(
         onDismissRequest = { confirmUninstall = false },
         title = { Text("卸载 ${plugin.name}？") },
         text = { Text("将删除插件的全部版本、权限记录和插件私有数据，此操作不可撤销。") },
@@ -458,28 +487,44 @@ private fun PluginDetailDialog(
 }
 
 @Composable
+private fun PluginDetailsSurface(
+    embedded: Boolean, onDismissRequest: () -> Unit,
+    title: @Composable () -> Unit, text: @Composable () -> Unit,
+    confirmButton: @Composable () -> Unit, dismissButton: @Composable () -> Unit,
+) {
+    SettingsConfirmationPage(onDismissRequest = onDismissRequest, title = title, text = text,
+        confirmButton = confirmButton, dismissButton = dismissButton)
+}
+
+@Composable
 private fun PluginActionRow(
     title: String,
     subtitle: String?,
     modifier: Modifier = Modifier,
     accent: Color = Color(0xFF9B8CFF),
     trailing: (@Composable () -> Unit)? = null,
+    icon: String = "⬡",
     onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     Row(
         modifier.fillMaxWidth()
-            .background(if (focused) Color(0x26FFFFFF) else Color(0x0FFFFFFF), RoundedCornerShape(18.dp))
-            .border(if (focused) 2.dp else 1.dp, if (focused) accent else Color(0x20FFFFFF), RoundedCornerShape(18.dp))
+            .background(if (focused) Color.White else Color(0x4D202020), RoundedCornerShape(18.dp))
+            .focusProperties { canFocus = true }
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-            .focusable(interactionSource = interaction)
+            .settingsAutoScroll()
             .padding(horizontal = 22.dp, vertical = 17.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        Box(Modifier.padding(end = 16.dp).size(44.dp)
+            .background(accent.copy(alpha = .18f), RoundedCornerShape(12.dp)),
+            contentAlignment = Alignment.Center) {
+            SettingsModuleIcon(SettingsCategory.PLUGINS, 28.dp, if (focused) Color.Black else Color.White)
+        }
         Column(Modifier.weight(1f)) {
-            Text(title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-            if (subtitle != null) Text(subtitle, color = Color(0xFFA5ACB8), fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp))
+            Text(title, color = if (focused) Color.Black else Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            if (subtitle != null) Text(subtitle, color = if (focused) Color(0xFF4A4E58) else Color(0xFFA5ACB8), fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp))
         }
         trailing?.invoke()
     }

@@ -210,9 +210,9 @@ class EmbyProvider(override var account: MediaAccount) : MediaSourceProvider {
         runCatching {
             val userId = account.userId
             val url = if (userId.isNotBlank()) {
-                "$baseUrl/Shows/$seriesId/Episodes?UserId=$userId&Fields=Overview,PrimaryImageAspectRatio,MediaSources"
+                "$baseUrl/Shows/$seriesId/Episodes?UserId=$userId&Fields=Overview,PrimaryImageAspectRatio,UserData"
             } else {
-                "$baseUrl/Shows/$seriesId/Episodes?Fields=Overview,PrimaryImageAspectRatio,MediaSources"
+                "$baseUrl/Shows/$seriesId/Episodes?Fields=Overview,PrimaryImageAspectRatio,UserData"
             }
             val req = request(url)
             val resp = client.newCall(req).execute()
@@ -236,10 +236,12 @@ class EmbyProvider(override var account: MediaAccount) : MediaSourceProvider {
                         durationText = if (durationMin > 0) "$durationMin 分钟" else "",
                         overview = obj.optString("Overview"),
                         thumbUrl = "$baseUrl/Items/$itemId/Images/Primary?quality=80&maxWidth=500&api_key=${account.token}",
-                        streamUrl = getStreamUrl(itemId),
+                        // Resolve transcode/direct-play policy only for the episode the user
+                        // actually starts; doing it here creates one request per episode.
+                        streamUrl = "$baseUrl/Videos/$itemId/stream?static=true&api_key=${account.token}",
                         playbackPositionMs = playedTicks / 10_000,
                         durationMs = ticks / 10_000,
-                        mediaSource = obj.optJSONArray("MediaSources")?.optJSONObject(0)?.let { parseSource(it) }
+                        mediaSource = null
                     )
                 )
             }

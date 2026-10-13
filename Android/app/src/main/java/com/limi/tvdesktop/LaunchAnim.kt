@@ -8,6 +8,7 @@ import androidx.compose.ui.geometry.Rect
 
 /** Launch-transition choices, persisted in the "desktop" prefs under "launchAnim". */
 enum class LaunchAnim(val label: String) {
+    AUTO("自动兼容"),
     SYSTEM("系统"),
     CIRCLE("圆形"),
     ZOOM("缩放"),
@@ -38,9 +39,27 @@ internal fun launchAppWithClipReveal(context: Context, view: View, bounds: Rect?
     val screenH = targetView.height.takeIf { it > 0 } ?: 1080
     val centerX = bounds?.center?.x?.toInt() ?: (screenW / 2)
     val centerY = bounds?.center?.y?.toInt() ?: (screenH / 2)
+    val launchIntent = Intent(intent).apply {
+        // Android launchers conventionally attach the source icon bounds as well as ActivityOptions.
+        // Some OEM window managers use this rectangle for their own app-opening transition.
+        sourceBounds = bounds?.let {
+            android.graphics.Rect(it.left.toInt(), it.top.toInt(), it.right.toInt(), it.bottom.toInt())
+        }
+    }
 
     val bundle = runCatching {
-        when (if (RenderPerformance.reducedEffects) LaunchAnim.SYSTEM else LaunchAnim.current(context)) {
+        if (RenderPerformance.motionMode == RenderPerformance.MotionMode.NONE) {
+            return@runCatching ActivityOptions.makeCustomAnimation(context, 0, 0).toBundle()
+        }
+        if (RenderPerformance.motionMode == RenderPerformance.MotionMode.REDUCED) {
+            return@runCatching ActivityOptions.makeCustomAnimation(context, R.anim.launch_fade_in, 0).toBundle()
+        }
+        when (LaunchAnim.current(context).let { selected ->
+            if (selected == LaunchAnim.AUTO) {
+                if (RenderPerformance.reducedEffects) LaunchAnim.SYSTEM else LaunchAnim.CIRCLE
+            } else selected
+        }) {
+            LaunchAnim.AUTO -> null
             LaunchAnim.SYSTEM -> null
             LaunchAnim.CIRCLE -> {
                 // Launcher3-style: reveal from the icon centre with a tight square.
@@ -51,7 +70,9 @@ internal fun launchAppWithClipReveal(context: Context, view: View, bounds: Rect?
                     side, side).toBundle()
             }
             LaunchAnim.ZOOM ->
-                ActivityOptions.makeScaleUpAnimation(targetView, centerX, centerY,
+                ActivityOptions.makeScaleUpAnimation(targetView,
+                    bounds?.left?.toInt() ?: centerX,
+                    bounds?.top?.toInt() ?: centerY,
                     bounds?.width?.toInt() ?: 0, bounds?.height?.toInt() ?: 0).toBundle()
             LaunchAnim.FADE ->
                 ActivityOptions.makeCustomAnimation(context, R.anim.launch_fade_in, 0).toBundle()
@@ -59,13 +80,15 @@ internal fun launchAppWithClipReveal(context: Context, view: View, bounds: Rect?
                 ActivityOptions.makeCustomAnimation(context, R.anim.launch_slide_up, 0).toBundle()
         }
     }.recoverCatching {
-        ActivityOptions.makeScaleUpAnimation(targetView, centerX, centerY,
+        ActivityOptions.makeScaleUpAnimation(targetView,
+            bounds?.left?.toInt() ?: centerX,
+            bounds?.top?.toInt() ?: centerY,
             bounds?.width?.toInt() ?: 0, bounds?.height?.toInt() ?: 0).toBundle()
     }.getOrNull()
 
     runCatching {
-        if (bundle != null) context.startActivity(intent, bundle) else context.startActivity(intent)
+        if (bundle != null) context.startActivity(launchIntent, bundle) else context.startActivity(launchIntent)
     }.onFailure {
-        runCatching { context.startActivity(intent) }
+        runCatching { context.startActivity(launchIntent) }
     }
 }

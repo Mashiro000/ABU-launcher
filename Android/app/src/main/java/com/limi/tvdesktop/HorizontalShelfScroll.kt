@@ -23,14 +23,15 @@ import kotlin.math.abs
  * on the same frame as the focus change, so pressing left/right reads as one gesture
  * instead of a scroll followed by a switch.
  */
-internal val ShelfScrollMotion: AnimationSpec<Float> =
-    tween(2000, easing = CubicBezierEasing(.16f, 1f, .3f, 1f))
+internal val ShelfScrollMotion: AnimationSpec<Float>
+    get() = focusMotion()
 
 /**
  * Holding the key re-targets before the previous leg has settled. A shorter leg keeps
  * the row moving with the repeat rate instead of queueing behind a full-length tween.
  */
-private val ShelfRepeatMotion: AnimationSpec<Float> = tween(110, easing = LinearOutSlowInEasing)
+private val ShelfRepeatMotion: AnimationSpec<Float>
+    get() = tween(RenderPerformance.duration(160), easing = LinearOutSlowInEasing)
 private const val RepeatWindowNanos = 220_000_000L
 
 internal class ShelfScrollController(
@@ -72,7 +73,7 @@ internal class ShelfScrollController(
                 state.animateScrollBy(delta, if (repeating) ShelfRepeatMotion else ShelfScrollMotion)
             } else if (!focused) {
                 // Nothing composed yet (first layout): reveal, then hand focus over.
-                state.animateScrollToItem(index)
+                if (RenderPerformance.reducedEffects) state.scrollToItem(index) else state.animateScrollToItem(index)
                 withFrameNanos { }
                 requestFocus()
             }

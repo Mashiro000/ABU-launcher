@@ -1,5 +1,7 @@
 # Android build and cache
 Android/.gradle/
+Android/gradle-home/
+test-shots/
 Android/.kotlin/
 Android/**/build/
 Android/local.properties

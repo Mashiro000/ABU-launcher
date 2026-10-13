@@ -1,6 +1,7 @@
 package com.limi.tvdesktop.plugins
 
 import android.content.Context
+import android.system.Os
 import org.json.JSONArray
 import org.json.JSONObject
 import com.limi.tvdesktop.plugins.runtime.PluginServiceRegistry
@@ -9,8 +10,6 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.util.zip.ZipInputStream
 
 /**
@@ -322,9 +321,8 @@ class PluginManager private constructor(private val context: Context) {
         val temp = File(target.parentFile, ".${target.name}.${System.nanoTime()}.tmp")
         temp.writeText(content)
         runCatching {
-            Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-        }.recoverCatching {
-            Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            // rename(2) atomically replaces a file on the same filesystem and is available since API 21.
+            Os.rename(temp.absolutePath, target.absolutePath)
         }.getOrElse {
             temp.delete()
             throw IllegalStateException("无法保存 ${target.name}", it)

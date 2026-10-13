@@ -24,7 +24,7 @@
 * **构建系统**：Gradle 9.5.0 + Android Gradle Plugin 9.3.2
 * **Java 运行级别**：Java 17 (JavaVersion.VERSION_17)
 * **SDK 兼容目标**：
-  * `minSdk` = 28 (Android 9 Pie)
+  * `minSdk` = 25 (Android 7.1 Nougat)
   * `targetSdk` = 35 (Android 15)
   * `compileSdk` = 36, `compileSdkMinor` = 1
 * **核心三方库**：

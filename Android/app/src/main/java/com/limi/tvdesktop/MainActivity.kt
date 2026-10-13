@@ -3,10 +3,12 @@ package com.limi.tvdesktop
 import android.os.Build
 import android.os.Bundle
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.view.View
+import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -23,6 +25,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.relocation.BringIntoViewRequester
@@ -89,6 +92,8 @@ import kotlinx.coroutines.CompletableDeferred
 
 class MainActivity : ComponentActivity() {
     private var pluginSafeModeWindowUntil = 0L
+    private var gamepadAxisDirection = 0
+    private var nextGamepadRepeatAt = 0L
     @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -118,6 +123,11 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         applyOrientationPreference()
         DeveloperDiagnostics.attach(this)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        AppUpdateManager.resumePendingInstallation(this)
     }
 
     private fun applyOrientationPreference() {
@@ -167,8 +177,48 @@ class MainActivity : ComponentActivity() {
             else -> event
         }
         // 播放器打开时优先把按键交给播放器（保证收起控件后任意键都能唤回）
-        PlayerKeyBridge.onKey?.let { handler -> if (handler(normalizedEvent)) return true }
+        // Settings owns directional input while visible. A retained player bridge must not
+        // swallow remote/gamepad/keyboard navigation before Compose's settings focus router.
+        if (!SettingsInputState.isOpen) {
+            PlayerKeyBridge.onKey?.let { handler -> if (handler(normalizedEvent)) return true }
+        }
         return super.dispatchKeyEvent(normalizedEvent)
+    }
+
+    override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
+        if (SettingsInputState.isOpen && event.action == android.view.MotionEvent.ACTION_MOVE &&
+            event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK)
+        ) {
+            val hatX = event.getAxisValue(android.view.MotionEvent.AXIS_HAT_X)
+            val hatY = event.getAxisValue(android.view.MotionEvent.AXIS_HAT_Y)
+            val x = if (kotlin.math.abs(hatX) >= .5f) hatX else event.getAxisValue(android.view.MotionEvent.AXIS_X)
+            val y = if (kotlin.math.abs(hatY) >= .5f) hatY else event.getAxisValue(android.view.MotionEvent.AXIS_Y)
+            val direction = when {
+                y <= -.55f -> android.view.KeyEvent.KEYCODE_DPAD_UP
+                y >= .55f -> android.view.KeyEvent.KEYCODE_DPAD_DOWN
+                x <= -.55f -> android.view.KeyEvent.KEYCODE_DPAD_LEFT
+                x >= .55f -> android.view.KeyEvent.KEYCODE_DPAD_RIGHT
+                else -> 0
+            }
+            if (direction == 0) {
+                gamepadAxisDirection = 0
+                nextGamepadRepeatAt = 0L
+                return true
+            }
+            val now = android.os.SystemClock.uptimeMillis()
+            if (direction != gamepadAxisDirection || now >= nextGamepadRepeatAt) {
+                val repeat = if (direction == gamepadAxisDirection) 1 else 0
+                val keyEvent = android.view.KeyEvent(
+                    now, now, android.view.KeyEvent.ACTION_DOWN, direction, repeat,
+                    event.metaState, event.deviceId, 0, event.flags, android.view.InputDevice.SOURCE_GAMEPAD
+                )
+                gamepadAxisDirection = direction
+                nextGamepadRepeatAt = now + if (repeat == 0) 420L else 170L
+                return dispatchKeyEvent(keyEvent)
+            }
+            return true
+        }
+        return super.dispatchGenericMotionEvent(event)
     }
 
     override fun onUserInteraction() {
@@ -211,19 +261,32 @@ internal object LibraryDesign {
 fun TvDesktop() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("desktop", Context.MODE_PRIVATE) }
-    var animeko by remember { mutableStateOf(prefs.getBoolean("animeko", false)) }
     // 旧版本可能存过已移除的“应用”页，兜底回媒体库，避免停在无标签的空白页。
-    var page by rememberSaveable { mutableStateOf(DesktopPreferences.LastTab.get(context).let { if (it == "应用") "媒体库" else it }) }
+    var page by rememberSaveable {
+        mutableStateOf(run {
+            // 启动默认页：指定页面时每次启动都回到它；"记住上次"才跟随 LastTab，无记录时回首页
+            val startup = DesktopPreferences.StartupPage.current(context)
+            val last = DesktopPreferences.LastTab.get(context).let { if (it == "应用") "媒体库" else it }
+            startup.pageName ?: last.ifBlank { "首页" }
+        })
+    }
     var settings by rememberSaveable { mutableStateOf(false) }
+    var modePicker by rememberSaveable { mutableStateOf(false) }
+    var signalPicker by rememberSaveable { mutableStateOf(false) }
+    val modeVersion = DesktopPreferences.version
+    val deviceMode = remember(modeVersion) { DesktopPreferences.DeviceMode.current(context) }
+    var controlCenterOrigin by remember { mutableStateOf<Offset?>(null) }
     var settingsPage by rememberSaveable { mutableStateOf(false) }
+    var settingsDestination by rememberSaveable { mutableStateOf<String?>(null) }
     var forceNativeSettings by rememberSaveable { mutableStateOf(false) }
     var wallpaperVersion by remember { mutableIntStateOf(0) }
     var selected by remember { mutableStateOf<DemoMedia?>(null) }
     var posterWallCategory by remember { mutableStateOf<MediaCategoryInfo?>(null) }
     var playingMedia by remember { mutableStateOf<MediaItemInfo?>(null) }
     var activeDataSourceId by remember { mutableStateOf<String?>(null) }
-    val dataSourcePlugins = remember(settingsPage, page) {
-        PluginManager.get(context).installed().filter { it.enabled && it.kind == PluginKind.DATA_SOURCE && it.entry != null }
+    val installedPlugins = remember(settingsPage, page) { PluginManager.get(context).installed() }
+    val dataSourcePlugins = remember(installedPlugins) {
+        installedPlugins.filter { it.enabled && it.kind == PluginKind.DATA_SOURCE && it.entry != null }
     }
     var playingInfo by remember { mutableStateOf<TvPlaybackInfo?>(null) }
     var subtitleConsent by remember { mutableStateOf<Pair<PluginConsentRequest, CompletableDeferred<Boolean>>?>(null) }
@@ -243,6 +306,11 @@ fun TvDesktop() {
         mpvLaunchedMediaId = null
     }
     var bannerIndex by rememberSaveable { mutableIntStateOf(0) }
+
+    // Check once per process launch. A found release is rendered above every app surface below.
+    LaunchedEffect(Unit) {
+        AppUpdateManager.check(context)
+    }
 
     // Build the real player package (stream URL, episode playlist, codecs) before opening the
     // player, so ExoPlayer is created with the correct media item instead of demo data.
@@ -318,7 +386,7 @@ fun TvDesktop() {
     val showDemo = AccountManager.showDemoWhenEmpty.value && !hasAccounts
     val isRecommendationMode = hasAccounts && realResumeWatching.isEmpty()
 
-    val watchingList = remember(hasAccounts, realResumeWatching.size, realLatestItems.size, showDemo) {
+    val watchingList = remember(realResumeWatching, realLatestItems, hasAccounts, showDemo) {
         if (realResumeWatching.isNotEmpty()) {
             realResumeWatching.map { it.toDemoMedia() }
         } else if (hasAccounts && realLatestItems.isNotEmpty()) {
@@ -330,7 +398,7 @@ fun TvDesktop() {
             emptyList()
         }
     }
-    val recentList = remember(hasAccounts, realLatestItems.size, showDemo) {
+    val recentList = remember(realLatestItems, showDemo) {
         if (realLatestItems.isNotEmpty()) {
             realLatestItems.map { it.toDemoMedia() }
         } else if (showDemo) {
@@ -339,7 +407,7 @@ fun TvDesktop() {
             emptyList()
         }
     }
-    val categoryList = remember(hasAccounts, realCategories.size, showDemo) {
+    val categoryList = remember(realCategories, showDemo) {
         if (realCategories.isNotEmpty()) {
             realCategories.map { it.toDemoMedia() }
         } else if (showDemo) {
@@ -349,7 +417,7 @@ fun TvDesktop() {
         }
     }
     var localFavVersion by remember { mutableIntStateOf(0) }
-    val favoriteList = remember(hasAccounts, realFavorites.size, realResumeWatching.size, realLatestItems.size, showDemo, localFavVersion) {
+    val favoriteList = remember(hasAccounts, realFavorites, realResumeWatching, realLatestItems, showDemo, localFavVersion) {
         val prefs = context.getSharedPreferences("favorites", 0)
         val pool = (realFavorites + realResumeWatching + realLatestItems).map { it.toDemoMedia() } +
             if (showDemo) (DemoLibrary.favorites + DemoLibrary.watching + DemoLibrary.recent) else emptyList()
@@ -380,32 +448,37 @@ fun TvDesktop() {
         if (selected?.let { isDetailMedia(it) } != true) DetailOrigin.retainedFocus = null
     }
     var search by rememberSaveable { mutableStateOf(false) }
-    var keyboardControl by remember { mutableStateOf(false) }
+    var keyboardControl by remember { mutableStateOf(deviceMode != DesktopPreferences.DeviceMode.HANDHELD) }
     val artwork = remember { DemoArtwork(context) }
-    LaunchedEffect(artwork) {
-        withContext(Dispatchers.Default) {
-            (DemoLibrary.watching + DemoLibrary.categories + DemoLibrary.favorites + DemoLibrary.recent + DemoLibrary.music + DemoLibrary.memories).forEach { artwork.image(it) }
-        }
-    }
     val haze = remember { HazeState() }
     val wallpaperHaze = remember { HazeState() }
+    val menuHaze = remember { HazeState() }
+    var homeFolderProgress by remember { mutableFloatStateOf(0f) }
     val glassPrefVersion = DesktopPreferences.version
     val appListBlur = remember(glassPrefVersion) { DesktopPreferences.GlassTuning.appListBlur(context) }
+    val appListBlurEnabled = remember(glassPrefVersion) { DesktopPreferences.GlassTuning.appListBlurEnabled(context) }
     val appListOpacity = remember(glassPrefVersion) { DesktopPreferences.GlassTuning.appListOpacity(context) }
     val wallpaperMode = remember(wallpaperVersion) { WallpaperMode.current(context) }
-    val fixedWallpaper = remember(wallpaperVersion, wallpaperMode) {
-        when (wallpaperMode) {
-            WallpaperMode.BING -> BingWallpaper.currentBitmap(context)
-            WallpaperMode.LOCAL -> LocalWallpapers.bitmap(context)
-            else -> null
+    val loadedWallpaper by produceState<ImageBitmap?>(null, wallpaperVersion, wallpaperMode) {
+        value = withContext(Dispatchers.IO) {
+            when (wallpaperMode) {
+                WallpaperMode.BING -> BingWallpaper.currentBitmap(context)
+                WallpaperMode.LOCAL -> LocalWallpapers.bitmap(context)
+                else -> null
+            }
         }
     }
+    val fixedWallpaper = loadedWallpaper
     var legacyBlur by remember { mutableStateOf<ImageBitmap?>(null) }
-    val cachedHomeBlur = page == "首页" && wallpaperMode != WallpaperMode.VIDEO
-    LaunchedEffect(artwork, banner, page, wallpaperMode, fixedWallpaper, RenderPerformance.staticBlur, cachedHomeBlur) {
-        legacyBlur = if (RenderPerformance.staticBlur || cachedHomeBlur) withContext(Dispatchers.Default) {
+    val cachedHomeBackdrop = page == "首页" && wallpaperMode != WallpaperMode.VIDEO && !RenderPerformance.reducedEffects &&
+        RenderPerformance.blurMode != RenderPerformance.BlurMode.NONE
+    val cachedHomeBlur = cachedHomeBackdrop && appListBlurEnabled && appListBlur > 0f
+    val cacheQuickMenuBackdrop = (settings || modePicker || signalPicker) && !RenderPerformance.reducedEffects &&
+        RenderPerformance.blurMode != RenderPerformance.BlurMode.NONE && (page != "首页" || wallpaperMode != WallpaperMode.VIDEO)
+    LaunchedEffect(artwork, banner, page, wallpaperMode, fixedWallpaper, RenderPerformance.staticBlur, cachedHomeBackdrop, cacheQuickMenuBackdrop) {
+        legacyBlur = if (RenderPerformance.staticBlur || cachedHomeBackdrop || cacheQuickMenuBackdrop) withContext(Dispatchers.Default) {
             when {
-                page == "媒体库" -> {
+                page == "媒体库" || (page == "首页" && wallpaperMode == WallpaperMode.FOLLOW_CONTENT) -> {
                     val backdropUrl = banner.realItem?.backdropUrl.orEmpty()
                     val remote = if (backdropUrl.isNotBlank()) PosterCacheManager.loadPoster(backdropUrl) else null
                     if (remote != null) artwork.blurredBitmap(remote.asAndroidBitmap(), "media:$backdropUrl")
@@ -421,6 +494,15 @@ fun TvDesktop() {
     }
     var homeExpandProgress by remember { mutableFloatStateOf(0f) }
     var homeReturnToTop by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var homeOpenApps by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var openAppsFromQuickMenu by remember { mutableStateOf(false) }
+    LaunchedEffect(page, homeOpenApps, openAppsFromQuickMenu) {
+        if (page == "首页" && openAppsFromQuickMenu && homeOpenApps != null) {
+            withFrameNanos { }
+            homeOpenApps?.invoke()
+            openAppsFromQuickMenu = false
+        }
+    }
     val list = rememberLazyListState()
     val watching = rememberLazyListState()
     val categories = rememberLazyListState()
@@ -474,7 +556,8 @@ fun TvDesktop() {
             selected != null -> selected = null
             posterWallCategory != null -> posterWallCategory = null
             search -> search = false
-            page == "首页" && homeExpandProgress > 0.05f -> homeReturnToTop?.invoke()
+            // 首页是桌面顶层：返回只负责收起展开的应用网格，不再强制切到媒体库
+            page == "首页" -> if (homeExpandProgress > 0.05f) homeReturnToTop?.invoke()
             page != "媒体库" -> page = "媒体库"
             scrolled -> returnToTop()
             else -> nav.requestFocus()
@@ -489,8 +572,8 @@ fun TvDesktop() {
         }
     }
     LaunchedEffect(Unit) {
-        if (page == "首页" && !settings && !search) homeDock.requestFocus()
-        else if (page == "媒体库" && !settings && !search && selected == null && posterWallCategory == null) first.requestFocus()
+        if (page == "首页" && !settings && !settingsPage && !search) homeDock.requestFocus()
+        else if (page == "媒体库" && !settings && !settingsPage && !search && selected == null && posterWallCategory == null) first.requestFocus()
     }
     BackHandler {
         closeOrReturn()
@@ -551,13 +634,18 @@ fun TvDesktop() {
 
                 rows
             }
-            FocusRowsHost(list, dynamicFocusRows, page == "媒体库" && selected == null && posterWallCategory == null && !settings && !search, onDirection = { keyboardControl = true }) {
+            // 页面级浮层独占方向键：控制中心、设置页、搜索、详情页、海报墙打开时，
+            // 媒体库的行导航不能吞掉 Up/Down，否则浮层里的选择无法用遥控器/键盘/手柄切换。
+            val rowNavigationEnabled = page == "媒体库" && selected == null &&
+                posterWallCategory == null && !settings && !modePicker && !signalPicker && !settingsPage && !search
+            FocusRowsHost(list, dynamicFocusRows, rowNavigationEnabled, onDirection = { keyboardControl = true }) {
             val progress = {
                 if (page != "媒体库") 0f
                 else if (list.firstVisibleItemIndex > 0) 1f
                 else (list.firstVisibleItemScrollOffset / (941f * scale)).coerceIn(0f, 1f)
             }
-            Box(Modifier.align(Alignment.TopCenter).requiredSize(1672.dp, canvasHeight).clipToBoundsCompat().pointerInput(Unit) {
+            Box(Modifier.align(Alignment.TopCenter).requiredSize(1672.dp, canvasHeight)
+                .clipToBoundsCompat().pointerInput(Unit) {
                 awaitPointerEventScope {
                     while (true) {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -571,17 +659,29 @@ fun TvDesktop() {
                     // When the control center is open, don't consume Back here: let its own
                     // BackHandler run the animated close, so Back matches tapping the 关闭 tile.
                     // 播放器打开时不拦截返回：交给播放器自己的 BackHandler（关抽屉→收控件→退出）
-                    val handledHere = !settings && !settingsPage && playingMedia == null
-                    if (it.type == KeyEventType.KeyDown && handledHere) closeOrReturn()
-                    handledHere
+                    // 首页是桌面顶层：preview 放行返回键，交给 BackHandler 链处理——
+                    // 长按菜单开着时由菜单关闭，网格展开时由首页收起，都没有则无事发生
+                    if (page == "首页") {
+                        false
+                    } else {
+                        val handledHere = !settings && !modePicker && !signalPicker && !settingsPage && playingMedia == null
+                        if (it.type == KeyEventType.KeyDown && handledHere) closeOrReturn()
+                        handledHere
+                    }
                 } else false
             }) {
-                Box(Modifier.fillMaxSize().then(if (RenderPerformance.blur31) Modifier.hazeSource(haze) else Modifier)) {
+                Box(Modifier.fillMaxSize()
+                    .then(if (RenderPerformance.blur31) Modifier.hazeSource(haze) else Modifier)) {
                     val videoUri = remember(wallpaperVersion, wallpaperMode) {
                         if (wallpaperMode == WallpaperMode.VIDEO) VideoWallpaperPrefs.current(context) else null
                     }
                     val currentBlurProgress = { if (page == "媒体库") progress() else if (page == "首页") homeExpandProgress else 0f }
+                    val backdropBlurProgress = { if (page == "首页" && !appListBlurEnabled) 0f else currentBlurProgress() }
 
+                    // Sample the rendered desktop backdrop, including the app-list blur,
+                    // gradient and scrim, rather than the original unfiltered wallpaper.
+                    Box(Modifier.fillMaxSize().then(if (RenderPerformance.blur31)
+                        Modifier.hazeSource(menuHaze) else Modifier)) {
                     if (page == "媒体库") {
                         FollowContentWallpaper(banner, artwork, wallpaperHaze)
                     } else {
@@ -590,20 +690,22 @@ fun TvDesktop() {
                                 VideoWallpaperSurface(videoUri, Modifier.fillMaxSize())
                             wallpaperMode != WallpaperMode.FOLLOW_CONTENT && fixedWallpaper != null ->
                                 Image(fixedWallpaper, null, Modifier.fillMaxSize()
-                                    .then(if (RenderPerformance.blur31 && !cachedHomeBlur) Modifier.hazeSource(wallpaperHaze) else Modifier),
+                                    .then(if (RenderPerformance.blur31)
+                                        Modifier.hazeSource(wallpaperHaze) else Modifier),
                                     contentScale = ContentScale.Crop)
                             wallpaperMode == WallpaperMode.FOLLOW_CONTENT ->
-                                FollowContentWallpaper(banner, artwork, wallpaperHaze, enableHaze = !cachedHomeBlur)
+                                FollowContentWallpaper(banner, artwork, wallpaperHaze)
                             else ->
                                 Image(artwork.background.asImageBitmap(), null, Modifier.fillMaxSize()
-                                    .then(if (RenderPerformance.blur31 && !cachedHomeBlur) Modifier.hazeSource(wallpaperHaze) else Modifier),
+                                    .then(if (RenderPerformance.blur31)
+                                        Modifier.hazeSource(wallpaperHaze) else Modifier),
                                     contentScale = ContentScale.Crop)
                         }
                     }
                     if (RenderPerformance.blur31 && !cachedHomeBlur) {
                         Box(Modifier.fillMaxSize().hazeEffect(wallpaperHaze) {
-                            blurEnabled = currentBlurProgress() > 0f
-                            blurRadius = ((if (page == "首页") appListBlur else 50f) * currentBlurProgress()).coerceAtLeast(.01f).dp
+                            blurEnabled = backdropBlurProgress() > 0f
+                            blurRadius = ((if (page == "首页") appListBlur else 50f) * backdropBlurProgress()).coerceAtLeast(.01f).dp
                             backgroundColor = Color.Transparent
                             tints = emptyList()
                             noiseFactor = 0f
@@ -613,11 +715,12 @@ fun TvDesktop() {
                         })
                     } else if ((RenderPerformance.staticBlur || cachedHomeBlur) && legacyBlur != null) {
                         Image(legacyBlur!!, null, Modifier.fillMaxSize().graphicsLayer {
-                            alpha = currentBlurProgress() * (if (page == "首页") (appListBlur / 50f).coerceIn(0f, 1f) else 1f)
+                            alpha = backdropBlurProgress() * (if (page == "首页") (appListBlur / 50f).coerceIn(0f, 1f) else 1f)
                         }, contentScale = ContentScale.Crop)
                     }
                     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0x08202020), Color(0x0A101010), Color(0xA6101010)))))
                     Canvas(Modifier.fillMaxSize()) { drawRect(Color.Black.copy(alpha = (if (page == "首页") appListOpacity else .72f) * currentBlurProgress())) }
+                    }
                     if (page == "媒体库") {
                         LazyColumn(state = list, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(0.dp)) {
                             item(key = "first-screen") {
@@ -645,7 +748,7 @@ fun TvDesktop() {
                                                 Text("当前媒体源: ${curAcc.name} (${curAcc.type.displayName}) ⇄", color = Color(0xFF93C5FD), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                                             }
                                         }
-                                        Crossfade(banner, Modifier.staggeredEntrance(0).height(120.dp), tween(if (RenderPerformance.reducedEffects) 90 else 220), label = "banner-title") { media ->
+                                        Crossfade(banner, Modifier.staggeredEntrance(0).height(120.dp), focusMotion(), label = "banner-title") { media ->
                                             val logoUrl = media.realItem?.logoUrl.orEmpty()
                                             val logoBitmap = if (logoUrl.isNotBlank()) rememberPosterImage(logoUrl) else null
                                             if (logoBitmap != null) {
@@ -672,7 +775,7 @@ fun TvDesktop() {
                                             }
                                         }
                                         Spacer(Modifier.height(29.dp))
-                                        Crossfade(banner, Modifier.staggeredEntrance(1).height(36.dp), tween(if (RenderPerformance.reducedEffects) 90 else 220), label = "banner-intro") { media ->
+                                        Crossfade(banner, Modifier.staggeredEntrance(1).height(36.dp), focusMotion(), label = "banner-intro") { media ->
                                             val introText = when {
                                                 media.realItem?.tagline?.isNotBlank() == true -> media.realItem.tagline
                                                 media.realItem?.overview?.isNotBlank() == true -> {
@@ -709,9 +812,10 @@ fun TvDesktop() {
                                                     activeDataSourceId = dataSourcePlugins.first().id
                                                 }
                                             }
-                                            if (!isRecommendationMode) {
+                                            val bannerPlaybackProgress = mediaPlaybackProgress(banner)
+                                            if (bannerPlaybackProgress > .001f) {
                                                 Column(Modifier.staggeredEntrance(3).width(340.dp)) {
-                                                    Progress(banner.progress, Modifier.fillMaxWidth().height(8.dp))
+                                                    Progress(bannerPlaybackProgress, Modifier.fillMaxWidth().height(8.dp))
                                                     Spacer(Modifier.height(12.dp))
                                                     Text(formatMediaProgressText(banner), color = Muted, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                                 }
@@ -844,14 +948,18 @@ fun TvDesktop() {
                             }
                         }
                     } else if (page == "首页") {
-                        val homeOwner = PluginSurfaceRegistry.owner("home", PluginManager.get(context).installed())
+                        val homeOwner = PluginSurfaceRegistry.owner("home", installedPlugins)
                         if (homeOwner != null) {
                             PluginSurfaceHost(homeOwner, "home")
                         } else {
-                            Box(Modifier.fillMaxSize()) {
-                                HomePage(wallpaperHaze, artwork, legacyBlur, homeDock, homeNav,
+                            Box(Modifier.fillMaxSize().zIndex(if (homeFolderProgress > 0.001f) 2f else 0f)) {
+                                HomePage(wallpaperHaze, menuHaze, artwork, legacyBlur, homeDock, homeNav,
+                                    onDesktopEdit = { settingsDestination = null; settings = false; settingsPage = true },
                                     onExpandProgress = { homeExpandProgress = it },
-                                    registerReturnToTop = { homeReturnToTop = it })
+                                    onFolderOverlayProgress = { homeFolderProgress = it },
+                                    registerReturnToTop = { homeReturnToTop = it },
+                                    registerOpenAppList = { homeOpenApps = it },
+                                    inputBlocked = settings || modePicker || signalPicker || settingsPage || search)
                                 PluginSlotHost("home.quickActions", Modifier.align(Alignment.TopEnd).padding(top = 132.dp, end = 52.dp).width(420.dp).heightIn(max = 300.dp))
                             }
                         }
@@ -870,11 +978,11 @@ fun TvDesktop() {
                         translationY = -120.dp.toPx() * homeExpandProgress
                     }
                 }) {
-                    Header(page, animeko, haze, legacyBlur, nav, homeNav, artwork, backdropReveal = {
+                    Header(page, haze, legacyBlur, nav, homeNav, artwork, backdropReveal = {
                         if (page != "媒体库") 0f
                         else if (list.firstVisibleItemIndex > 0) 1f
                         else (list.firstVisibleItemScrollOffset / ((618f - 112f) * scale)).coerceIn(0f, 1f)
-                    }, onPage = { selected = null; page = it; if (it == "首页") homeReturnToTop?.invoke() }, onSettings = { settings = true }, onSearch = { search = true },
+                    }, onPage = { selected = null; page = it; if (it == "首页") homeReturnToTop?.invoke() }, onSettings = { origin -> controlCenterOrigin = origin; settings = true }, onSearch = { search = true },
                         onContent = { if (page == "媒体库") returnToTop(playback) else if (page == "首页") homeDock.requestFocus() })
                 }
                 if (posterWallCategory != null) {
@@ -911,11 +1019,36 @@ fun TvDesktop() {
                 }
                 }
                 if (settings) ControlCenter(haze, legacyBlur, onSettings = {
+                    settingsDestination = null
                     settings = false
                     settingsPage = true
-                }, onClose = { settings = false })
+                }, onClose = { settings = false }, deviceMode = deviceMode, origin = controlCenterOrigin,
+                    onSwitchMode = { modePicker = true },
+                    onSignalSources = { signalPicker = true },
+                    onHiddenApps = { settingsDestination = "hidden_apps"; forceNativeSettings = true; settingsPage = true },
+                    onApps = { selected = null; page = "首页"; openAppsFromQuickMenu = true },
+                    onSearch = { search = true },
+                    onAnimationSettings = { settingsDestination = "performance"; forceNativeSettings = true; settingsPage = true })
+                if (modePicker) DeviceModePicker(haze, legacyBlur, deviceMode,
+                    onSelect = { mode ->
+                        DesktopPreferences.DeviceMode.save(context, mode)
+                        keyboardControl = mode != DesktopPreferences.DeviceMode.HANDHELD
+                    }, onDismiss = {
+                        modePicker = false
+                        scope.launch {
+                            withFrameNanos { }
+                            runCatching { if (page == "首页") homeDock.requestFocus() else nav.requestFocus() }
+                        }
+                    })
+                if (signalPicker) SignalSourcePicker(haze, legacyBlur, onDismiss = {
+                    signalPicker = false
+                    scope.launch {
+                        withFrameNanos { }
+                        runCatching { if (page == "首页") homeDock.requestFocus() else nav.requestFocus() }
+                    }
+                })
                 if (settingsPage) {
-                    val settingsOwner = PluginSurfaceRegistry.owner("settings", PluginManager.get(context).installed())
+                    val settingsOwner = PluginSurfaceRegistry.owner("settings", installedPlugins)
                     if (settingsOwner != null && !forceNativeSettings) {
                         BackHandler { forceNativeSettings = true }
                         Box(Modifier.fillMaxSize().zIndex(200f).background(Color(0xFA090B10))) {
@@ -933,7 +1066,14 @@ fun TvDesktop() {
                         SettingsPage(haze = haze, staticBlur = legacyBlur, onClose = {
                             settingsPage = false
                             forceNativeSettings = false
-                        }, onWallpaperChanged = { wallpaperVersion++ })
+                            settingsDestination = null
+                        }, onWallpaperChanged = { wallpaperVersion++ },
+                            initialDetail = settingsDestination?.takeIf { it == "hidden_apps" },
+                            initialCategory = when (settingsDestination) {
+                                "hidden_apps" -> SettingsCategory.APPLICATIONS
+                                "performance" -> SettingsCategory.PERFORMANCE
+                                else -> SettingsCategory.DESKTOP
+                            })
                     }
                 }
                 activeDataSourceId?.let { id ->
@@ -1013,6 +1153,12 @@ fun TvDesktop() {
                 }
                 if (ScreenSaverState.isActive) {
                     ScreenSaverOverlay(onDismiss = { ScreenSaverState.dismiss() })
+                }
+                when (val update = AppUpdateManager.state.takeUnless { AppUpdateManager.dialogSuppressed || settingsPage }) {
+                    is UpdateCheckState.Available -> AppUpdateDialog(update.release, update, AppUpdateManager::dismissAvailable)
+                    is UpdateCheckState.Downloading -> AppUpdateDialog(update.release, update, AppUpdateManager::dismissAvailable)
+                    is UpdateCheckState.Ready -> AppUpdateDialog(update.release, update, AppUpdateManager::dismissAvailable)
+                    else -> Unit
                 }
                 PerformanceOverlay()
             }
@@ -1240,11 +1386,16 @@ private fun FollowContentWallpaper(
     banner: DemoMedia,
     artwork: DemoArtwork,
     wallpaperHaze: HazeState,
+    menuHaze: HazeState? = null,
     enableHaze: Boolean = true
 ) {
     Crossfade(banner, Modifier.fillMaxSize()
-        .then(if (enableHaze && RenderPerformance.blur33) Modifier.hazeSource(wallpaperHaze) else Modifier),
-        animationSpec = tween(if (RenderPerformance.reducedEffects) 100 else 260), label = "banner-background") { media ->
+        .then(if (enableHaze && RenderPerformance.blur33) {
+            Modifier.hazeSource(wallpaperHaze).then(
+                if (RenderPerformance.blur31 && menuHaze != null) Modifier.hazeSource(menuHaze) else Modifier
+            )
+        } else Modifier),
+        animationSpec = focusMotion(), label = "banner-background") { media ->
         val realBackdrop = media.realItem?.backdropUrl
         val remoteBmp = if (!realBackdrop.isNullOrBlank()) rememberPosterImage(realBackdrop) else null
         if (remoteBmp != null) {
@@ -1254,21 +1405,21 @@ private fun FollowContentWallpaper(
             // unrelated bundled demo image.
             Box(Modifier.fillMaxSize().background(Color(0xFF141414)))
         } else {
-            Image(if (media.title == "海岸线之外") artwork.background.asImageBitmap() else artwork.image(media),
+            Image(if (media.title == "海岸线之外") artwork.background.asImageBitmap() else artwork.rememberImage(media),
                 null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
         }
     }
 }
 
 @Composable
-private fun Header(page: String, animeko: Boolean, haze: HazeState, legacyBlur: ImageBitmap?, nav: FocusRequester, homeNav: FocusRequester, artwork: DemoArtwork, backdropReveal: () -> Float, onPage: (String) -> Unit, onSettings: () -> Unit, onSearch: () -> Unit, onContent: () -> Unit) {
+private fun Header(page: String, haze: HazeState, legacyBlur: ImageBitmap?, nav: FocusRequester, homeNav: FocusRequester, artwork: DemoArtwork, backdropReveal: () -> Float, onPage: (String) -> Unit, onSettings: (Offset?) -> Unit, onSearch: () -> Unit, onContent: () -> Unit) {
     val context = LocalContext.current
     val tuningVersion = DesktopPreferences.version
     val navBlur = remember(tuningVersion) { DesktopPreferences.GlassTuning.navBlur(context) }
     val navOpacity = remember(tuningVersion) { DesktopPreferences.GlassTuning.navOpacity(context) }
     val canvasHeight = LocalCanvasHeight.current
     TopBarBackdrop(haze, backdropReveal)
-    val tabs = listOf("首页", "媒体库", "直播", "游戏") + if (animeko) listOf("Animeko") else emptyList()
+    val tabs = listOf("首页", "媒体库")
     // 每个标签槽位保持 124dp 设计宽度，标签数变化时导航条整体等比伸缩。
     val width = 124.dp * tabs.size
     var hoveredTab by remember { mutableStateOf<String?>(null) }
@@ -1280,10 +1431,12 @@ private fun Header(page: String, animeko: Boolean, haze: HazeState, legacyBlur: 
     }) {
         Box(Modifier.fillMaxSize().clip(Glass)
         .then(if (RenderPerformance.blur31) Modifier.hazeEffect(haze) {
-            blurRadius = navBlur.dp; noiseFactor = .025f
-            backgroundColor = Color(0xFF333333)
-            tints = listOf(HazeTint(Color(0x40404040)))
-            progressive = HazeProgressive.verticalGradient(startIntensity = 1f, endIntensity = .65f)
+            blurEnabled = navBlur > 0f
+            blurRadius = navBlur.coerceAtLeast(.01f).dp
+            noiseFactor = 0f
+            backgroundColor = Color.Transparent
+            tints = emptyList()
+            fallbackTint = HazeTint(Color.Transparent)
         } else Modifier)) {
         if (RenderPerformance.staticBlur && legacyBlur != null && navBlur > 0f) {
             Canvas(Modifier.fillMaxSize().graphicsLayer { alpha = (navBlur / 24f).coerceIn(0f, 1f) }) {
@@ -1305,9 +1458,9 @@ private fun Header(page: String, animeko: Boolean, haze: HazeState, legacyBlur: 
                 }
                 val raised = if (keyboardNavigation) focused else hoveredTab == tab || (focused && hoveredTab == null)
                 val baseReveal by animateFloatAsState(if (active && !raised) 1f else 0f,
-                    tween(300), label = "navigation-current-$tab")
+                    focusMotion(), label = "navigation-current-$tab")
                 val raisedReveal by animateFloatAsState(if (raised) 1f else 0f,
-                    tween(300), label = "navigation-highlight-$tab")
+                    focusMotion(), label = "navigation-highlight-$tab")
                 LaunchedEffect(focused) {
                     if (focused) {
                         // Complete the focus transaction before replacing page content.
@@ -1346,7 +1499,7 @@ private fun Header(page: String, animeko: Boolean, haze: HazeState, legacyBlur: 
                     NavigationCapsule(currentCapsuleWidth, 51.08.dp, baseReveal)
                     NavigationCapsule(capsuleWidth + 30.dp, 74.dp, raisedReveal, raised)
                     Text(tab, color = lerp(Color(0xFFD4D4D4), Color(0xFF161616), maxOf(baseReveal, raisedReveal)),
-                        fontSize = if (tab == "Animeko") 19.sp else 22.sp,
+                        fontSize = 22.sp,
                         fontWeight = if (active || raised) FontWeight.SemiBold else FontWeight.Normal)
                 }
             }
@@ -1354,29 +1507,87 @@ private fun Header(page: String, animeko: Boolean, haze: HazeState, legacyBlur: 
     }
     var time by remember { mutableStateOf("") }
     var wifi by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
+    val timeFormat = remember(tuningVersion) { DesktopPreferences.TimeFormat.current(context) }
+    val showSeconds = remember(tuningVersion) { DesktopPreferences.ClockDisplay.showSeconds(context) }
+    LaunchedEffect(timeFormat, showSeconds) {
         val cm = context.getSystemService(ConnectivityManager::class.java)
+        val formatter = SimpleDateFormat(DesktopPreferences.ClockDisplay.pattern(timeFormat, showSeconds), Locale.CHINA)
         while (true) {
-            time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+            time = formatter.format(Date())
             wifi = cm.getNetworkCapabilities(cm.activeNetwork)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
             delay(1000)
         }
     }
-    Row(Modifier.offset(1350.dp, 34.dp).height(46.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(LibraryDesign.cardGap)) {
-        Box(Modifier.size(36.dp).rowFocusTarget(row = "header").optionZoom().clickable(onClick = onSearch), contentAlignment = Alignment.Center) {
+    Row(Modifier.offset(y = 32.dp).fillMaxWidth().padding(end = 48.dp).height(50.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End)) {
+        HeaderStatusChip(Modifier.size(48.dp).rowFocusTarget(row = "header"), onClick = onSearch) { color ->
             Canvas(Modifier.size(28.dp)) {
-                drawCircle(Color(0xFFE0E0E0), radius = size.width * .31f, center = Offset(size.width * .4f, size.height * .4f), style = androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx()))
-                drawLine(Color(0xFFE0E0E0), Offset(size.width * .64f, size.height * .64f), Offset(size.width * .9f, size.height * .9f), 2.dp.toPx())
+                drawCircle(color, radius = size.width * .31f, center = Offset(size.width * .4f, size.height * .4f), style = androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx()))
+                drawLine(color, Offset(size.width * .64f, size.height * .64f), Offset(size.width * .9f, size.height * .9f), 2.dp.toPx())
             }
         }
         Box(Modifier.width(1.dp).height(22.dp).background(Color(0x66999999)))
-        Text(time, color = Color(0xFFD6D6D6), fontSize = 21.sp)
-        Canvas(Modifier.size(32.dp)) {
-            val color = if (wifi) Color(0xFFE6E6E6) else Color(0xFF909090)
+        HeaderStatusChip(Modifier.height(48.dp).rowFocusTarget(row = "header"), onClickAt = onSettings) { color ->
+            Text(time, color = color, fontSize = 21.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, modifier = Modifier.padding(horizontal = 12.dp))
+        }
+        HeaderStatusChip(Modifier.size(48.dp).rowFocusTarget(row = "header"), onClick = {
+            runCatching { context.startActivity(android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                .onFailure { android.widget.Toast.makeText(context, "此设备未提供 Wi-Fi 设置入口", android.widget.Toast.LENGTH_SHORT).show() }
+        }) { focusedColor ->
+          Canvas(Modifier.size(32.dp)) {
+            val color = if (wifi) focusedColor else focusedColor.copy(alpha = .56f)
             for (radius in listOf(26f, 18f, 10f)) drawArc(color, 225f, 90f, false, topLeft = Offset((size.width - radius.dp.toPx()) / 2, (size.height - radius.dp.toPx()) / 2 + 6.dp.toPx()), size = androidx.compose.ui.geometry.Size(radius.dp.toPx(), radius.dp.toPx()), style = androidx.compose.ui.graphics.drawscope.Stroke(2.5.dp.toPx()))
             drawCircle(color, 2.dp.toPx(), Offset(size.width / 2, size.height * .76f))
+          }
         }
-        Image(artwork.background.asImageBitmap(), "打开快捷控制中心", Modifier.size(42.dp).rowFocusTarget(row = "header").optionZoom().clip(Glass).border(1.5.dp, Color(0xFFC4C4C4), Glass).clickable(onClick = onSettings), contentScale = ContentScale.Crop)
+        HeaderStatusChip(Modifier.size(48.dp).rowFocusTarget(row = "header"), onClickAt = onSettings) { _ ->
+            Image(artwork.background.asImageBitmap(), "打开快捷控制中心", Modifier.size(40.dp).clip(Glass), contentScale = ContentScale.Crop)
+        }
+    }
+}
+
+@Composable
+private fun HeaderStatusChip(
+    modifier: Modifier,
+    onClick: (() -> Unit)? = null,
+    onClickAt: ((Offset?) -> Unit)? = null,
+    content: @Composable (Color) -> Unit
+) {
+    val interaction = remember { MutableInteractionSource() }
+    var chipCoordinates by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
+    var pointerOrigin by remember { mutableStateOf<Offset?>(null) }
+    val focused by interaction.collectIsFocusedAsState()
+    val hovered by interaction.collectIsHoveredAsState()
+    val active = focused || hovered
+    val reveal by animateFloatAsState(if (active) 1f else 0f, focusMotion(), label = "header-status-focus")
+    val shape = RoundedCornerShape(16.dp)
+    Box(modifier.zIndex(if (active) 3f else 0f).graphicsLayer {
+        val scale = 1f + .08f * reveal
+        scaleX = scale; scaleY = scale
+    }.clip(shape).background(Color.White.copy(alpha = .9f * reveal))
+        .onGloballyPositioned { chipCoordinates = it }
+        .then(if (onClickAt != null) Modifier.pointerInput(Unit) {
+            awaitPointerEventScope {
+                while (true) {
+                    val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                    if (event.type == androidx.compose.ui.input.pointer.PointerEventType.Press) {
+                        pointerOrigin = event.changes.firstOrNull()?.position?.let { point ->
+                            runCatching { chipCoordinates?.localToRoot(point) }.getOrNull()
+                        }
+                    }
+                }
+            }
+        } else Modifier)
+        .hoverable(interaction)
+        .focusProperties { canFocus = true }
+        .then(if (onClick != null || onClickAt != null) Modifier.clickable(interactionSource = interaction, indication = null) {
+            onClick?.invoke()
+            onClickAt?.invoke(pointerOrigin ?: chipCoordinates?.let { coordinates ->
+                runCatching { coordinates.localToRoot(Offset(coordinates.size.width / 2f, coordinates.size.height / 2f)) }.getOrNull()
+            })
+            pointerOrigin = null
+        } else Modifier.focusable(interactionSource = interaction)),
+        contentAlignment = Alignment.Center) {
+        content(lerp(Color(0xFFE0E0E0), Color(0xFF14171C), reveal))
     }
 }
 
@@ -1397,12 +1608,20 @@ internal fun FocusCard(
     modifier: Modifier,
     radius: Dp = 12.dp,
     onClick: () -> Unit,
+    onLongClick: ((Rect) -> Unit)? = null,
     zoomOnFocus: Boolean = true,
     onHighlightChanged: (Boolean) -> Unit = {},
     borderBlendMode: BlendMode = BlendMode.SrcOver,
     borderOnlyWhenHighlighted: Boolean = false,
     showBorder: Boolean = true,
     uniformExpansionDp: Dp? = null,
+    onReturnRevealChanged: (Float) -> Unit = {},
+    forceHighlight: Boolean = false,
+    onClickWithBounds: ((Rect) -> Unit)? = null,
+    onVisualBoundsChanged: ((Rect, Rect) -> Unit)? = null,
+    useAppCornerPreference: Boolean = false,
+    onMenuKey: ((Rect, FocusRequester) -> Unit)? = null,
+    onContextClick: ((Rect, FocusRequester) -> Unit)? = null,
     content: @Composable BoxScope.() -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -1411,15 +1630,31 @@ internal fun FocusCard(
     val hovered by interaction.collectIsHoveredAsState()
     val keyboardControl = LocalKeyboardControl.current
     LaunchedEffect(hovered, keyboardControl) { if (hovered && !keyboardControl) ownFocus.requestFocus() }
-    val highlight = focused || (hovered && !keyboardControl) || DetailOrigin.retainedFocus === ownFocus
+    // forceHighlight: 长按菜单打开时保持该卡片的放大高亮，焦点交给菜单后图标不回缩
+    val highlight = focused || (hovered && !keyboardControl) || DetailOrigin.retainedFocus === ownFocus || forceHighlight
     // While the detail page collapses back, this card's border and content fade/slide in
     // with the reveal instead of popping; the zoom stays put to match the return bounds.
     val returning = DetailOrigin.retainedFocus === ownFocus && DetailOrigin.returning
-    val reveal = if (returning) DetailOrigin.returnProgress else 1f
+    var returnedOnce by remember { mutableStateOf(false) }
+    val postReturnReveal = remember { Animatable(1f) }
+    LaunchedEffect(returning) {
+        if (returning) {
+            returnedOnce = true
+            postReturnReveal.snapTo(0f)
+        } else if (returnedOnce) {
+            // The detail layer covered the card during the collapse, so revealing underneath it
+            // was invisible. Fade the target card's labels only after the overlay has finished.
+            postReturnReveal.snapTo(0f)
+            postReturnReveal.animateTo(1f, focusMotion())
+            returnedOnce = false
+        }
+    }
+    val reveal = if (returning) 0f else postReturnReveal.value
     val coverAlpha = if (returning) 0f else 1f
+    SideEffect { onReturnRevealChanged(reveal) }
     LaunchedEffect(highlight) { onHighlightChanged(highlight) }
     val baseEmphasis by animateFloatAsState(if (highlight) 1f else 0f, focusMotion(), label = "card-emphasis")
-    val emphasisAlpha by animateFloatAsState(if (returning) 0f else 1f, tween(300), label = "return-glow-fade")
+    val emphasisAlpha by animateFloatAsState(if (returning) 0f else 1f, pageMotion(), label = "return-glow-fade")
     val glowEmphasis = baseEmphasis * emphasisAlpha
     val borderEmphasis = if (returning) 0f else baseEmphasis
     // The highlight zoom stays put through the whole detail-page cycle, so the return's single
@@ -1430,9 +1665,25 @@ internal fun FocusCard(
     )
     var cardCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
     val density = LocalDensity.current
-    val shape = ContinuousCornerShape(radius)
+    val cornerVersion = DesktopPreferences.version
+    val context = LocalContext.current
+    val shape = if (useAppCornerPreference && remember(cornerVersion) {
+            DesktopPreferences.AppCornerStyle.current(context)
+        } == DesktopPreferences.AppCornerStyle.DEFAULT) RoundedCornerShape(radius)
+        else ContinuousCornerShape(radius)
+    fun reportVisualBounds(coordinates: LayoutCoordinates) {
+        val base = coordinates.boundsInRoot()
+        if (base.width <= 0f || base.height <= 0f) return
+        val expansionX = if (zoomOnFocus) uniformExpansionDp?.let { with(density) { it.toPx() } * zoomProgress }
+            ?: base.width * .05f * zoomProgress else 0f
+        val expansionY = if (zoomOnFocus) uniformExpansionDp?.let { with(density) { it.toPx() } * zoomProgress }
+            ?: base.height * .05f * zoomProgress else 0f
+        onVisualBoundsChanged?.invoke(base, Rect(base.left - expansionX, base.top - expansionY,
+            base.right + expansionX, base.bottom + expansionY))
+    }
+    SideEffect { cardCoordinates?.takeIf { it.isAttached }?.let(::reportVisualBounds) }
 
-    Box(modifier.onGloballyPositioned { cardCoordinates = it }.zIndex(if (highlight) 2f else if (borderEmphasis > .001f) 1f else 0f).graphicsLayer {
+    Box(modifier.onGloballyPositioned { cardCoordinates = it; reportVisualBounds(it) }.zIndex(if (highlight) 2f else if (borderEmphasis > .001f) 1f else 0f).graphicsLayer {
         if (uniformExpansionDp != null && size.width > 0f && size.height > 0f) {
             val expansionPx = uniformExpansionDp.toPx()
             val maxScaleX = (size.width + 2f * expansionPx) / size.width
@@ -1459,7 +1710,31 @@ internal fun FocusCard(
             }
         }
         .clip(shape).focusRequester(ownFocus).focusProperties { canFocus = true }.onFocusChanged { focused = it.isFocused }
-        .hoverable(interaction).clickable(interactionSource = interaction, indication = null, onClick = {
+        .pointerInput(onContextClick) {
+            if (onContextClick != null) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        if (event.type == PointerEventType.Press && event.buttons.isSecondaryPressed) {
+                            onContextClick(cardCoordinates?.boundsInRoot() ?: Rect.Zero, ownFocus)
+                            event.changes.forEach { it.consume() }
+                        }
+                    }
+                }
+            }
+        }
+        .onPreviewKeyEvent { event ->
+            val native = event.nativeKeyEvent
+            if (onMenuKey != null && event.type == KeyEventType.KeyDown &&
+                native.keyCode == android.view.KeyEvent.KEYCODE_MENU && native.repeatCount == 0) {
+                onMenuKey(cardCoordinates?.boundsInRoot() ?: Rect.Zero, ownFocus)
+                true
+            } else false
+        }.hoverable(interaction).combinedClickable(
+            interaction,
+            null,
+            onLongClick = onLongClick?.let { callback -> { callback(cardCoordinates?.boundsInRoot() ?: Rect.Zero) } },
+            onClick = {
             val cardBounds = cardCoordinates?.boundsInRoot() ?: Rect.Zero
             // Anchor at the card's highlighted bounds, the size it keeps for the whole
             // detail-page cycle, so the return lands exactly on the card with no size jump.
@@ -1482,7 +1757,7 @@ internal fun FocusCard(
                 (cardBounds.center.y + halfHeight) / density.density)
             DetailOrigin.restoreFocus = { ownFocus.requestFocus() }
             if (DetailOrigin.retainedFocus == null) DetailOrigin.retainedFocus = ownFocus
-            onClick()
+            if (onClickWithBounds != null) onClickWithBounds(cardBounds) else onClick()
         })) {
             CompositionLocalProvider(LocalCardReveal provides reveal, LocalCardCoverAlpha provides coverAlpha) {
                 content()
@@ -1508,28 +1783,70 @@ internal fun Modifier.optionZoom(): Modifier {
     var focused by remember { mutableStateOf(false) }
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
-    val zoom by animateFloatAsState(if (focused || hovered) 1.2f else 1f, tween(160), label = "option-focus")
+    val zoom by animateFloatAsState(if (focused || hovered) 1.2f else 1f, focusMotion(), label = "option-focus")
     return this.zIndex(if (focused || hovered) 2f else 0f).graphicsLayer { scaleX = zoom; scaleY = zoom }
         .focusSweep(focused || (hovered && !LocalKeyboardControl.current))
         .focusProperties { canFocus = true }.onFocusChanged { focused = it.isFocused }.hoverable(interaction)
 }
 
+private fun formatWatchingClock(media: DemoMedia): String {
+    val real = media.realItem
+    val totalMs = real?.totalDurationMs?.takeIf { it > 0L } ?: 45L * 60L * 1000L
+    val positionMs = real?.playbackPositionMs?.takeIf { it > 0L }
+        ?: (totalMs * mediaPlaybackProgress(media)).toLong()
+    fun clock(ms: Long): String {
+        val seconds = (ms / 1000L).coerceAtLeast(0L)
+        val hours = seconds / 3600L
+        val minutes = (seconds % 3600L) / 60L
+        val remainingSeconds = seconds % 60L
+        return if (hours > 0L) "%d:%02d:%02d".format(hours, minutes, remainingSeconds)
+        else "%02d:%02d".format(minutes, remainingSeconds)
+    }
+    return "${clock(positionMs)} / ${clock(totalMs)}"
+}
+
+private fun mediaPlaybackProgress(media: DemoMedia): Float {
+    val real = media.realItem
+    return when {
+        real != null && real.totalDurationMs > 0L && real.playbackPositionMs > 0L ->
+            (real.playbackPositionMs.toFloat() / real.totalDurationMs.toFloat()).coerceIn(0f, 1f)
+        real != null && real.progress > 0f -> real.progress.coerceIn(0f, 1f)
+        else -> media.progress.coerceIn(0f, 1f)
+    }
+}
+
+private fun watchingEpisodeLabel(media: DemoMedia): String {
+    val episode = media.realItem?.episodeNumber?.takeIf { it > 0 }
+    if (episode != null && media.realItem?.mediaType == "Episode") return "第 ${episode} 集"
+    return Regex("第\\s*(\\d+)\\s*集").find(media.detail)?.groupValues?.getOrNull(1)?.let { "第 ${it} 集" }.orEmpty()
+}
+
 @Composable
 private fun WatchingCard(media: DemoMedia, artwork: DemoArtwork, modifier: Modifier, onClick: () -> Unit) {
     FocusCard(modifier, onClick = onClick) {
-        val reveal = LocalCardReveal.current
-        val coverAlpha = LocalCardCoverAlpha.current
-        val realUrl = media.realItem?.backdropUrl?.ifBlank { media.realItem?.posterUrl.orEmpty() } ?: media.realItem?.posterUrl.orEmpty()
-        val networkBitmap = if (realUrl.isNotBlank()) rememberPosterImage(realUrl) else null
-        Image(networkBitmap ?: artwork.image(media), null, Modifier.fillMaxSize().graphicsLayer { alpha = coverAlpha }, contentScale = ContentScale.Crop)
-        // Gradient slides up from below; caption fades in — synced with the return reveal.
-        Box(Modifier.fillMaxSize().graphicsLayer { translationY = (1f - reveal) * size.height }.background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xDD0D0D0D)))))
-        Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(24.dp).graphicsLayer { alpha = reveal }) {
-            Text(media.title, color = White, fontSize = LibraryDesign.title, lineHeight = 32.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Spacer(Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Progress(media.progress, Modifier.weight(1f).height(8.dp))
-                Text(formatMediaProgressText(media), color = Color(0xFFDDDDDD), fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Box(Modifier.fillMaxSize()) {
+            val reveal = LocalCardReveal.current
+            val coverAlpha = LocalCardCoverAlpha.current
+            val realUrl = media.realItem?.backdropUrl?.ifBlank { media.realItem?.posterUrl.orEmpty() } ?: media.realItem?.posterUrl.orEmpty()
+            val networkBitmap = if (realUrl.isNotBlank()) rememberPosterImage(realUrl) else null
+            val cover = networkBitmap ?: artwork.rememberImage(media)
+            Image(cover, null, Modifier.fillMaxSize().graphicsLayer { alpha = coverAlpha }, contentScale = ContentScale.Crop)
+            // A gradient keeps labels readable without three extra cover textures and
+            // offscreen blur passes for every visible card, including on older televisions.
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(
+                Color.Transparent, Color.Transparent, Color(0xB3101728)))))
+            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(70.dp).graphicsLayer {
+                translationY = (1f - reveal) * size.height
+            }.background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .5f)))))
+            Text(formatWatchingClock(media), Modifier.align(Alignment.TopStart).padding(start = 20.dp, top = 16.dp).graphicsLayer { alpha = reveal }, color = White, fontSize = 18.sp, lineHeight = 24.sp)
+            Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 16.dp).graphicsLayer { alpha = reveal }) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Text(media.title, Modifier.weight(1f), color = White, fontSize = LibraryDesign.title, lineHeight = 32.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val episode = watchingEpisodeLabel(media)
+                    if (episode.isNotBlank()) Text(episode, color = White, fontSize = 20.sp, lineHeight = 30.sp, maxLines = 1)
+                }
+                Spacer(Modifier.height(10.dp))
+                Progress(mediaPlaybackProgress(media), Modifier.fillMaxWidth().height(6.dp))
             }
         }
     }
@@ -1621,7 +1938,7 @@ internal fun categoryCardSize(ratio: Float): Pair<Dp, Dp> = when {
 private fun CategoryCard(media: DemoMedia, artwork: DemoArtwork, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val realUrl = media.realItem?.posterUrl.orEmpty()
     val networkBitmap = if (realUrl.isNotBlank()) rememberPosterImage(realUrl) else null
-    val imgBitmap = networkBitmap ?: artwork.image(media)
+    val imgBitmap = networkBitmap ?: artwork.rememberImage(media)
 
     // Deterministic size: derived from the server ratio / local artwork / heuristic, never
     // from the async-loaded bitmap. Otherwise the card reflows once the poster lands and the
@@ -1661,6 +1978,7 @@ internal fun PosterCard(media: DemoMedia, artwork: DemoArtwork, width: Dp = Libr
     val visibility = remember { BringIntoViewRequester() }
     var itemSize by remember { mutableStateOf(IntSize.Zero) }
     val density = LocalDensity.current
+    var returnReveal by remember { mutableFloatStateOf(1f) }
     LaunchedEffect(highlighted, itemSize) {
         if (highlighted && itemSize.height > 0) {
             // Child focus relocation sees only the cover. Relocate the complete item
@@ -1680,15 +1998,17 @@ internal fun PosterCard(media: DemoMedia, artwork: DemoArtwork, width: Dp = Libr
     // Elevate and scale the whole row item so the cover cannot obscure its caption.
     Column(Modifier.width(width).then(if (entranceIndex != null) Modifier.staggeredEntrance(entranceIndex) else Modifier).rowFocusTarget(row = focusRow).bringIntoViewRequester(visibility).onSizeChanged { itemSize = it }
         .zIndex(if (highlighted) 10f else if (zoom > 1.001f) 5f else 0f).graphicsLayer { scaleX = zoom; scaleY = zoom }) {
-        FocusCard(Modifier.fillMaxWidth().height(height), 12.dp, onClick, zoomOnFocus = false, onHighlightChanged = { highlighted = it }) {
+        FocusCard(Modifier.fillMaxWidth().height(height), 12.dp, onClick, zoomOnFocus = false, onHighlightChanged = { highlighted = it }, onReturnRevealChanged = { returnReveal = it }) {
             val coverAlpha = LocalCardCoverAlpha.current
             val realUrl = media.realItem?.posterUrl.orEmpty()
             val networkBitmap = if (realUrl.isNotBlank()) rememberPosterImage(realUrl) else null
-            Image(networkBitmap ?: artwork.image(media), null, Modifier.fillMaxSize().graphicsLayer { alpha = coverAlpha }, contentScale = ContentScale.Crop)
+            Image(networkBitmap ?: artwork.rememberImage(media), null, Modifier.fillMaxSize().graphicsLayer { alpha = coverAlpha }, contentScale = ContentScale.Crop)
         }
-        Spacer(Modifier.height(12.dp))
-        Text(media.title, color = White, fontSize = LibraryDesign.title, lineHeight = 32.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(media.detail, color = Muted, fontSize = LibraryDesign.metadata, lineHeight = 28.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Column(Modifier.graphicsLayer { alpha = returnReveal }) {
+            Spacer(Modifier.height(12.dp))
+            Text(media.title, color = White, fontSize = LibraryDesign.title, lineHeight = 32.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(media.detail, color = Muted, fontSize = LibraryDesign.metadata, lineHeight = 28.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
 

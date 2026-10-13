@@ -33,8 +33,8 @@ internal data class FocusRowSpec(val id: String, val lazyIndex: Int, val centerO
  * Vertical page scroll: a smooth, non-bouncy ease-out curve matching the horizontal
  * shelf glide, so up/down section moves feel as fluid as left/right card moves.
  */
-internal val RowScrollMotion: AnimationSpec<Float> =
-    tween(2000, easing = CubicBezierEasing(.16f, 1f, .3f, 1f))
+internal val RowScrollMotion: AnimationSpec<Float>
+    get() = focusMotion()
 
 /**
  * LazyListState.animateScrollToItem hardcodes a critically-damped spring and exposes no
@@ -42,6 +42,10 @@ internal val RowScrollMotion: AnimationSpec<Float> =
  * so section jumps share the same lightly-damped glide.
  */
 internal suspend fun LazyListState.animateScrollToItemSpring(index: Int, scrollOffset: Int = 0) {
+    if (RenderPerformance.reducedEffects) {
+        scrollToItem(index, scrollOffset)
+        return
+    }
     val visible = layoutInfo.visibleItemsInfo
     if (visible.isEmpty()) return
     val firstIndex = firstVisibleItemIndex
@@ -69,6 +73,16 @@ private class RowFocusNavigator(val scope: CoroutineScope) {
     val nodes = mutableListOf<RowFocusNode>()
     val firstReveal = mutableMapOf<String, suspend () -> Unit>()
     var active: RowFocusNode? = null
+
+    /**
+     * Row targets that currently hold focus. An overlay composed above the page (设置页、控制中心、
+     * 播放器、插件浮层) moves focus out of the row system; Up/Down must then reach that overlay
+     * instead of being consumed here, otherwise it can never be navigated with a remote, a
+     * keyboard or a gamepad.
+     */
+    val focusedNodes = mutableSetOf<RowFocusNode>()
+    fun ownsFocus(): Boolean = focusedNodes.isNotEmpty()
+
     var rows: List<FocusRowSpec> = emptyList()
     var reveal: suspend (FocusRowSpec) -> Unit = {}
     var edge: suspend (Int) -> Unit = {}
@@ -79,6 +93,9 @@ private class RowFocusNavigator(val scope: CoroutineScope) {
     private var anchorX = 0f
 
     fun move(direction: Int): Boolean {
+        // Focus belongs to an overlay right now: let the event travel to it untouched.
+        // pendingRow keeps rapid repeats working while our own focus handover is in flight.
+        if (!ownsFocus() && pendingRow == null) return false
         val source = active ?: return false
         val sourceRow = pendingRow ?: source.row
         val index = rows.indexOfFirst { it.id == sourceRow }
@@ -200,7 +217,10 @@ private val LocalRowId = staticCompositionLocalOf<String?> { null }
     CompositionLocalProvider(LocalRowNavigator provides navigator, LocalRowId provides null,
         LocalBringIntoViewSpec provides relocation) {
         Box(Modifier.fillMaxSize().onGloballyPositioned { viewportCoordinates = it }.onPreviewKeyEvent {
-            if (enabled && (it.key == Key.DirectionDown || it.key == Key.DirectionUp)) {
+            // Only claim vertical keys while the row system actually owns focus. Overlays rendered
+            // above the page (设置页等) take focus away, and swallowing Up/Down here would leave
+            // them unresponsive to every D-pad-like input.
+            if (enabled && navigator.ownsFocus() && (it.key == Key.DirectionDown || it.key == Key.DirectionUp)) {
                 if (it.type == KeyEventType.KeyDown) {
                     onDirection()
                     navigator.move(if (it.key == Key.DirectionDown) 1 else -1)
@@ -235,11 +255,23 @@ internal fun Modifier.rowFocusTarget(requester: FocusRequester? = null, row: Str
     }
     DisposableEffect(navigator, node) {
         navigator.nodes.add(node)
-        onDispose { navigator.nodes.remove(node) }
+        onDispose {
+            navigator.nodes.remove(node)
+            // A disposed row must never keep claiming focus ownership for the key handler.
+            navigator.focusedNodes.remove(node)
+        }
     }
     this.bringIntoViewRequester(visibility).onSizeChanged { size = it }
         .focusRequester(node.requester).onGloballyPositioned { node.coordinates = it }
-        .onFocusChanged { focused = it.hasFocus; if (it.hasFocus) navigator.active = node }
+        .onFocusChanged { state ->
+            focused = state.hasFocus
+            if (state.hasFocus) {
+                navigator.active = node
+                navigator.focusedNodes.add(node)
+            } else {
+                navigator.focusedNodes.remove(node)
+            }
+        }
 }
 
 internal val LibraryFocusRows = listOf(

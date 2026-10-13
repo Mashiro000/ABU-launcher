@@ -2,55 +2,103 @@ package com.limi.tvdesktop
 
 import android.app.ActivityOptions
 import android.content.Context
-import android.content.Intent
 import android.content.ComponentName
+import android.content.pm.LauncherApps
+import android.content.pm.ShortcutInfo
+import android.os.Process
+import android.net.Uri
+import android.appwidget.AppWidgetHost
+import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProviderInfo
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.Drawable
 import android.os.Build
+import android.os.SystemClock
 import android.view.View
-import android.icu.util.ChineseCalendar
-import android.icu.util.Calendar
+import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateValueAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
 import androidx.compose.foundation.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.*
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.*
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.Surface
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
 import dev.chrisbanes.haze.*
 import kotlinx.coroutines.*
+import java.text.Collator
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlin.math.roundToInt
 import java.io.File
 import java.security.MessageDigest
 import org.json.JSONArray
@@ -65,7 +113,10 @@ private data class DockApp(
     val launch: Intent,
     val bannerBgColor: Int = android.graphics.Color.rgb(38, 42, 48),
     val packageName: String,
-    val activityName: String
+    val activityName: String,
+    val folder: HomeFolder? = null,
+    val customIcon: ImageBitmap? = null,
+    val firstInstallTime: Long = 0L
 )
 private data class DockAppSource(
     val name: String,
@@ -73,22 +124,31 @@ private data class DockAppSource(
     val activityName: String,
     val banner: Drawable?,
     val drawable: Drawable,
-    val launch: Intent
+    val launch: Intent,
+    val firstInstallTime: Long = 0L
 )
+private data class PendingWidgetBind(val id: Int, val provider: AppWidgetProviderInfo, val width: Int, val height: Int, val configuring: Boolean = false)
+private data class FolderCreateRequest(val app: DockApp, val bounds: Rect)
+private data class OpenFolderRequest(val folder: HomeFolder, val bounds: Rect, val picking: Boolean = false)
+private data class FolderMenuRequest(val folder: HomeFolder, val bounds: Rect, val requester: FocusRequester?)
+private data class FolderVisualAnchor(val base: Rect, val visual: Rect)
+private data class FolderAddMode(val target: HomeFolder, val targetBounds: Rect)
 private object DockAppCache {
     @Volatile var apps: List<DockApp> = emptyList()
 }
+private val AppVisualSlots = kotlinx.coroutines.sync.Semaphore(2)
 
-/** Small LRU for decoded visuals. Metadata for every app is cheap; only recently visible card
- * bitmaps remain resident. */
+/** In-memory cache for decoded visuals. Keeps all grid app visuals resident for zero-lag scrolling. */
 private object DockVisualMemoryCache {
-    private const val MAX_ENTRIES = 36
+    var revision by mutableIntStateOf(0)
+    private const val MAX_ENTRIES = 256
     private val entries = object : LinkedHashMap<String, DockApp>(MAX_ENTRIES, .75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, DockApp>?) = size > MAX_ENTRIES
     }
     private fun key(packageName: String, activityName: String) = "$packageName/$activityName"
     @Synchronized fun get(app: DockApp): DockApp? = entries[key(app.packageName, app.activityName)]
     @Synchronized fun put(app: DockApp) { entries[key(app.packageName, app.activityName)] = app }
+    @Synchronized fun clear() { entries.clear(); revision++ }
 }
 
 /** Fixed-size persistent TV-banner cache. Avoid decoding and uploading full-resolution banners
@@ -101,7 +161,7 @@ private object AppBannerCache {
     private fun baseFile(context: Context, packageName: String): File {
         val digest = MessageDigest.getInstance("SHA-256").digest(packageName.toByteArray())
             .joinToString("") { "%02x".format(it) }
-        return File(context.cacheDir, "app-banners/v$VERSION-$digest")
+        return File(context.filesDir, "launcher-banners/v$VERSION-$digest")
     }
 
     fun read(context: Context, packageName: String, sourceUpdatedAt: Long): BannerResult? = runCatching {
@@ -138,8 +198,10 @@ private object AppBannerCache {
 private object InstalledAppSnapshot {
     private const val PREFS = "installed_app_snapshot"
     private const val KEY_APPS = "apps_v1"
+    private const val KEY_SCANNED_AT = "scanned_at"
+    private const val REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000L
 
-    data class Entry(val name: String, val packageName: String, val activityName: String)
+    data class Entry(val name: String, val packageName: String, val activityName: String, val firstInstallTime: Long = 0L)
 
     fun read(context: Context): List<Entry> = runCatching {
         val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_APPS, null)
@@ -148,17 +210,40 @@ private object InstalledAppSnapshot {
         buildList(array.length()) {
             repeat(array.length()) { index ->
                 val item = array.getJSONObject(index)
-                add(Entry(item.getString("name"), item.getString("package"), item.getString("activity")))
+                add(Entry(
+                    item.getString("name"),
+                    item.getString("package"),
+                    item.getString("activity"),
+                    item.optLong("firstInstallTime", 0L)
+                ))
             }
         }
     }.getOrDefault(emptyList())
 
+    fun isFresh(context: Context): Boolean {
+        val scannedAt = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getLong(KEY_SCANNED_AT, 0L)
+        return scannedAt > 0L && System.currentTimeMillis() - scannedAt < REFRESH_INTERVAL_MS
+    }
+
+    fun markFresh(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putLong(KEY_SCANNED_AT, System.currentTimeMillis()).commit()
+    }
+
     fun write(context: Context, sources: List<DockAppSource>) {
         val array = JSONArray()
         sources.forEach { source ->
-            array.put(JSONObject().put("name", source.name).put("package", source.packageName).put("activity", source.activityName))
+            array.put(JSONObject()
+                .put("name", source.name)
+                .put("package", source.packageName)
+                .put("activity", source.activityName)
+                .put("firstInstallTime", source.firstInstallTime))
         }
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_APPS, array.toString()).apply()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_APPS, array.toString())
+            .putLong(KEY_SCANNED_AT, System.currentTimeMillis())
+            .commit()
     }
 }
 
@@ -177,7 +262,8 @@ private fun sourceFromSnapshot(context: Context, entry: InstalledAppSnapshot.Ent
         banner = banner,
         drawable = icon,
         launch = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-            .setClassName(entry.packageName, entry.activityName).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            .setClassName(entry.packageName, entry.activityName).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        firstInstallTime = entry.firstInstallTime
     )
 }.getOrNull()
 
@@ -191,7 +277,8 @@ private fun processSource(context: Context, source: DockAppSource): DockApp? = r
         source.launch,
         bannerRes?.backgroundColor ?: android.graphics.Color.rgb(38, 42, 48),
         source.packageName,
-        source.activityName
+        source.activityName,
+        firstInstallTime = source.firstInstallTime
     ).also(DockVisualMemoryCache::put)
 }.getOrNull()
 
@@ -202,7 +289,8 @@ private fun snapshotApp(entry: InstalledAppSnapshot.Entry) = DockApp(
     launch = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         .setClassName(entry.packageName, entry.activityName).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
     packageName = entry.packageName,
-    activityName = entry.activityName
+    activityName = entry.activityName,
+    firstInstallTime = entry.firstInstallTime
 )
 
 private fun sourceApp(source: DockAppSource) = DockApp(
@@ -211,21 +299,29 @@ private fun sourceApp(source: DockAppSource) = DockApp(
     icon = null,
     launch = source.launch,
     packageName = source.packageName,
-    activityName = source.activityName
+    activityName = source.activityName,
+    firstInstallTime = source.firstInstallTime
 )
 
 @Composable
 private fun rememberVisualApp(app: DockApp): DockApp {
+    if (app.banner != null || app.icon != null) {
+        return app
+    }
     val context = LocalContext.current
-    return produceState(initialValue = DockVisualMemoryCache.get(app) ?: app, app.packageName, app.activityName) {
+    val visual = key(app.packageName, app.activityName, DockVisualMemoryCache.revision) { produceState(initialValue = DockVisualMemoryCache.get(app) ?: app, app.packageName, app.activityName) {
         if (value.banner != null || value.icon != null) return@produceState
         value = withContext(Dispatchers.IO) {
+            AppVisualSlots.acquire()
+            try {
             DockVisualMemoryCache.get(app) ?: sourceFromSnapshot(
                 context,
-                InstalledAppSnapshot.Entry(app.name, app.packageName, app.activityName)
+                InstalledAppSnapshot.Entry(app.name, app.packageName, app.activityName, app.firstInstallTime)
             )?.let { processSource(context, it) } ?: app
+            } finally { AppVisualSlots.release() }
         }
-    }.value
+    }.value }
+    return visual.copy(name = app.name, folder = app.folder, customIcon = app.customIcon)
 }
 
 private fun isValidBanner(drawable: Drawable?): Boolean {
@@ -276,35 +372,162 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
     }.getOrNull()
 }
 
+@OptIn(ExperimentalHazeApi::class)
 @Composable internal fun HomePage(
     wallpaperHaze: HazeState,
+    menuHaze: HazeState,
     artwork: DemoArtwork,
     staticBlur: ImageBitmap?,
     first: FocusRequester,
     navigation: FocusRequester,
+    onDesktopEdit: () -> Unit = {},
     onExpandProgress: (Float) -> Unit = {},
-    registerReturnToTop: ((() -> Unit)?) -> Unit = {}
+    onFolderOverlayProgress: (Float) -> Unit = {},
+    registerReturnToTop: ((() -> Unit)?) -> Unit = {},
+    registerOpenAppList: ((() -> Unit)?) -> Unit = {},
+    inputBlocked: Boolean = false,
 ) {
     val context = LocalContext.current
     val view = LocalView.current
-    val shape = ContinuousCornerShape(43.25.dp)
+    val cornerStyle = remember(DesktopPreferences.version) { DesktopPreferences.AppCornerStyle.current(context) }
+    val shape = if (cornerStyle == DesktopPreferences.AppCornerStyle.DEFAULT) RoundedCornerShape(43.25.dp)
+        else ContinuousCornerShape(43.25.dp)
     val dockTint = Color.Black.copy(alpha = .2f)
     val canvasHeight = LocalCanvasHeight.current
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
 
     var expanded by remember { mutableStateOf(false) }
+    var featureRevision by remember { mutableIntStateOf(0) }
+    var activeMenu by remember { mutableStateOf<DockApp?>(null) }
+    var activeMenuBounds by remember { mutableStateOf<Rect?>(null) }
+    var activeFolderMenu by remember { mutableStateOf<FolderMenuRequest?>(null) }
+    var menuReturnRequester by remember { mutableStateOf<FocusRequester?>(null) }
+    // 菜单是否正在关闭：关闭开始后 forceHighlight 立即退场，改由真实焦点维持放大，
+    // 避免关闭动画（700ms）期间用户移焦后旧图标仍被卡在放大态
+    var menuClosing by remember { mutableStateOf(false) }
+    // 待恢复焦点的应用 key：长按菜单关闭后把焦点还给打开菜单的图标
+    var menuReturnKey by remember { mutableStateOf<String?>(null) }
+    fun showContextMenu(app: DockApp, bounds: Rect, requester: FocusRequester?) {
+        activeFolderMenu = null
+        menuReturnRequester = requester
+        menuClosing = false
+        activeMenu = app
+        activeMenuBounds = bounds
+    }
+    fun showFolderContextMenu(folder: HomeFolder, bounds: Rect, requester: FocusRequester?) {
+        activeFolderMenu = FolderMenuRequest(folder, bounds, requester)
+    }
+
+    // 需要保持放大高亮的应用：菜单打开未关闭时是长按的应用；兜底恢复期间是 menuReturnKey。
+    // 关闭开始后由真实焦点接管，不再用 forceHighlight 维持，移焦不会留下卡住的放大态。
+    val forceHighlightKey: String? = when {
+        menuReturnKey != null -> menuReturnKey
+        activeMenu != null && !menuClosing -> activeMenu?.let(::appKey)
+        else -> null
+    }
+    var lastConfirmKeyDownAt by remember { mutableLongStateOf(0L) }
+    var suppressMenuOpeningRelease by remember { mutableStateOf(false) }
+    var layoutRevision by remember { mutableIntStateOf(0) }
+    var editOrderKeys by remember { mutableStateOf<List<String>?>(null) }
+    var editingKey by remember { mutableStateOf<String?>(null) }
+    var dockPlacementKey by remember { mutableStateOf<String?>(null) }
+    var iconEditApp by remember { mutableStateOf<DockApp?>(null) }
+    val iconPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val app = iconEditApp
+        if (uri != null && app != null && AppHomeFeatures.saveCustomIcon(context, appKey(app), uri)) featureRevision++
+    }
+    var folderToOpen by remember { mutableStateOf<OpenFolderRequest?>(null) }
+    var returningFolderId by remember { mutableStateOf<String?>(null) }
+    val folderAnchors = remember { mutableStateMapOf<String, FolderVisualAnchor>() }
+    var folderLayerReady by remember { mutableStateOf(false) }
+    fun folderSourceHidden(folder: HomeFolder?): Boolean =
+        folderLayerReady && folder != null && folderToOpen?.folder?.id == folder.id
+    fun updateFolderAnchor(folder: HomeFolder?, base: Rect, visual: Rect) {
+        if (folder == null || base.width <= 0f || base.height <= 0f) return
+        val next = FolderVisualAnchor(base, visual)
+        if (folderAnchors[folder.id] != next) folderAnchors[folder.id] = next
+    }
+    var folderAddMode by remember { mutableStateOf<FolderAddMode?>(null) }
+    val stagedFolderKeys = remember { mutableStateListOf<String>() }
+    var stagingCompleting by remember { mutableStateOf(false) }
+    var pendingPinApp by remember { mutableStateOf<DockApp?>(null) }
+    var pinMode by remember { mutableStateOf<String?>(null) }
+    var pinFirstEntry by remember { mutableStateOf("") }
+    var folderAnimation by remember { mutableStateOf<FolderCreateRequest?>(null) }
+    var widgetOwner by remember { mutableStateOf<DockApp?>(null) }
+    var chosenWidgetProvider by remember { mutableStateOf<AppWidgetProviderInfo?>(null) }
+    var widgets by remember { mutableStateOf(AppHomeFeatures.widgets(context)) }
+    var pendingWidgetBind by remember { mutableStateOf<PendingWidgetBind?>(null) }
+    val widgetHost = remember(context) { AppWidgetHost(context, 0xAB17) }
+    val widgetManager = remember(context) { AppWidgetManager.getInstance(context) }
+    DisposableEffect(widgetHost) {
+        runCatching { widgetHost.startListening() }
+        onDispose { runCatching { widgetHost.stopListening() } }
+    }
+    fun persistWidget(pending: PendingWidgetBind) {
+        widgets = widgets.filterNot { it.id == pending.id } + HomeWidget(pending.id, pending.provider.provider.flattenToString(), pending.width, pending.height)
+        AppHomeFeatures.saveWidgets(context, widgets)
+    }
+    val widgetConfigLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val pending = pendingWidgetBind
+        if (pending != null && result.resultCode == android.app.Activity.RESULT_OK) persistWidget(pending)
+        else if (pending != null) widgetHost.deleteAppWidgetId(pending.id)
+        pendingWidgetBind = null
+    }
+    val widgetBindLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val pending = pendingWidgetBind
+        if (pending != null && result.resultCode == android.app.Activity.RESULT_OK) {
+            if (pending.provider.configure != null) {
+                pendingWidgetBind = pending.copy(configuring = true)
+                widgetConfigLauncher.launch(Intent(AppWidgetManager.ACTION_APPWIDGET_CONFIGURE)
+                    .setComponent(pending.provider.configure)
+                    .putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, pending.id)
+                    .putExtra(AppWidgetManager.EXTRA_APPWIDGET_PROVIDER, pending.provider.provider)
+                    .putExtra(AppWidgetManager.EXTRA_APPWIDGET_OPTIONS, android.os.Bundle()))
+            } else persistWidget(pending)
+            if (pending.provider.configure == null) pendingWidgetBind = null
+        } else if (pending != null) widgetHost.deleteAppWidgetId(pending.id)
+        if (pending == null || result.resultCode != android.app.Activity.RESULT_OK) pendingWidgetBind = null
+    }
     val progress by animateFloatAsState(
         targetValue = if (expanded) 1f else 0f,
-        animationSpec = tween(if (RenderPerformance.reducedEffects) 160 else 480, easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)),
+        animationSpec = pageMotion(),
         label = "home-expand-progress"
     )
 
-    LaunchedEffect(progress) {
-        onExpandProgress(progress)
+    val publishExpandProgress by rememberUpdatedState(onExpandProgress)
+    LaunchedEffect(Unit) {
+        snapshotFlow { progress }.collect { publishExpandProgress(it) }
     }
+    val showGrid by remember { derivedStateOf { expanded || progress > .001f } }
 
-    val apps by produceState(DockAppCache.apps, context) {
+    var inventoryRevision by remember { mutableIntStateOf(0) }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(context, lifecycleOwner) {
+        fun refresh() {
+            DockVisualMemoryCache.clear()
+            inventoryRevision++
+        }
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) { refresh() }
+        }
+        val filter = android.content.IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED)
+            addAction(Intent.ACTION_PACKAGE_CHANGED)
+            addDataScheme("package")
+        }
+        androidx.core.content.ContextCompat.registerReceiver(context, receiver, filter,
+            androidx.core.content.ContextCompat.RECEIVER_EXPORTED)
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) refresh()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { context.unregisterReceiver(receiver); lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    val apps by produceState(DockAppCache.apps, context, inventoryRevision) {
         // Restore the last known ordering first. Icon processing has its own disk cache, so a
         // cold process can paint the launcher without waiting for a package-manager scan.
         val savedEntries = withContext(Dispatchers.IO) { InstalledAppSnapshot.read(context) }
@@ -320,11 +543,17 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                 value = restoredDock
             }
 
-            // The grid is metadata-only. LazyColumn loads visuals only for visible rows.
+            // Publish snapshot shell quickly for instant rendering
             val restored = restoredDock + savedEntries.drop(6).map(::snapshotApp)
             DockAppCache.apps = restored
             value = restored
+
+            // Grid visuals load only when their rows are composed.
         }
+
+        // PackageManager enumeration and label/icon loading is one of the most expensive parts
+        // of launcher startup. A persisted snapshot is authoritative for a short window; a later
+        // background refresh picks up installs/removals without reloading everything on each entry.
 
         // Refresh in the background. Only publish a new list when packages/activities or labels
         // actually changed, avoiding the visible reload on every launch.
@@ -342,6 +571,9 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                     }.getOrNull()
                     val icon = runCatching { entry.loadIcon(pm) }.getOrNull() ?: return@mapNotNull null
                     val label = runCatching { entry.loadLabel(pm).toString() }.getOrNull() ?: entry.activityInfo.packageName
+                    val installTime = runCatching {
+                        pm.getPackageInfo(entry.activityInfo.packageName, 0).firstInstallTime
+                    }.getOrDefault(0L)
                     DockAppSource(
                         name = label,
                         packageName = entry.activityInfo.packageName,
@@ -350,7 +582,8 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                         drawable = icon,
                         launch = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
                             .setClassName(entry.activityInfo.packageName, entry.activityInfo.name)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                        firstInstallTime = installTime
                     )
                 }.getOrNull()
             }
@@ -358,7 +591,10 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
 
         val savedSignature = savedEntries.map { Triple(it.packageName, it.activityName, it.name) }
         val freshSignature = sources.map { Triple(it.packageName, it.activityName, it.name) }
-        if (value.isNotEmpty() && savedSignature == freshSignature) return@produceState
+        if (inventoryRevision == 0 && value.isNotEmpty() && savedSignature == freshSignature) {
+            withContext(Dispatchers.IO) { InstalledAppSnapshot.markFresh(context) }
+            return@produceState
+        }
 
         withContext(Dispatchers.IO) { InstalledAppSnapshot.write(context, sources) }
 
@@ -372,10 +608,11 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
             value = initialProcessed
         }
 
-        // Then process the remaining apps in background
+        // Show the rest immediately with shell apps
         val all = initialProcessed + sources.drop(6).map(::sourceApp)
         DockAppCache.apps = all
         value = all
+
     }
 
     val prefVersion = DesktopPreferences.version
@@ -393,16 +630,199 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
     val cardPaddingV = ((dockHeight - cardHeight) / 2).coerceAtLeast(14.dp)
     val artworkSize = 80.96.dp * scale
 
-    val dockApps = remember(apps) { apps.take(6) }
-    val gridApps = remember(apps) { apps.drop(6) }
+    val folders = remember(featureRevision) { AppHomeFeatures.folders(context) }
+    val displayFolders = remember(folders, stagedFolderKeys.toList(), folderAddMode) {
+        if (folderAddMode == null || stagedFolderKeys.isEmpty()) folders else folders.mapNotNull { folder ->
+            if (folder.id == folderAddMode?.target?.id) folder
+            else {
+                val remaining = folder.members.filterNot(stagedFolderKeys::contains)
+                when {
+                    remaining.isEmpty() -> null
+                    remaining.size == 1 && folder.members.size > 1 -> null
+                    else -> folder.copy(members = remaining)
+                }
+            }
+        }
+    }
+    val hiddenKeys = remember(featureRevision) { AppHomeFeatures.hidden(context) }
+    val baseHomeEntries = remember(apps, displayFolders, hiddenKeys, featureRevision, stagedFolderKeys.toList()) {
+        val byKey = apps.associateBy { "${it.packageName}/${it.activityName}" }
+        fun customized(app: DockApp): DockApp {
+            val key = appKey(app)
+            return app.copy(
+                name = AppHomeFeatures.customLabel(context, key) ?: app.name,
+                customIcon = AppHomeFeatures.customIcon(context, key)
+            )
+        }
+        val owners = displayFolders.flatMap { folder -> folder.members.map { it to folder } }.toMap()
+        val insertedFolders = mutableSetOf<String>()
+        buildList {
+            apps.forEach { app ->
+                val key = "${app.packageName}/${app.activityName}"
+                if (key in hiddenKeys || key in stagedFolderKeys) return@forEach
+                val owner = owners[key]
+                if (owner != null) {
+                    if (insertedFolders.add(owner.id)) {
+                        val first = owner.members.firstNotNullOfOrNull(byKey::get) ?: app
+                        add(first.copy(name = owner.name, folder = owner, packageName = "folder.${owner.id}", activityName = owner.id))
+                    }
+                } else add(customized(app))
+            }
+            displayFolders.filter { insertedFolders.add(it.id) }.forEach { folder ->
+                val first = folder.members.firstNotNullOfOrNull(byKey::get) ?: return@forEach
+                add(customized(first).copy(name = folder.name, folder = folder, packageName = "folder.${folder.id}", activityName = folder.id))
+            }
+        }
+    }
+    val appSort = remember(prefVersion) { DesktopPreferences.AppSort.current(context) }
+    val homeEntries = remember(baseHomeEntries, appSort, layoutRevision, editOrderKeys) {
+        val byKey = baseHomeEntries.associateBy(::appKey)
+        val saved = AppHomeFeatures.homeOrder(context)
+        val folderByMember = displayFolders.flatMap { folder -> folder.members.map { it to "folder.${folder.id}/${folder.id}" } }.toMap()
+        val canonical = buildList {
+            saved.forEach { key -> byKey[key]?.let { add(it) } ?: folderByMember[key]?.let(byKey::get)?.let { folder -> if (none { appKey(it) == appKey(folder) }) add(folder) } }
+            baseHomeEntries.forEach { app -> if (none { appKey(it) == appKey(app) }) add(app) }
+        }.toMutableList()
+        folderAddMode?.let { mode ->
+            val key = "folder.${mode.target.id}/${mode.target.id}"
+            val originalIndex = saved.indexOf(key)
+            val currentIndex = canonical.indexOfFirst { appKey(it) == key }
+            if (originalIndex >= 0 && currentIndex >= 0 && currentIndex != originalIndex) {
+                val pinned = canonical.removeAt(currentIndex)
+                canonical.add(originalIndex.coerceAtMost(canonical.size), pinned)
+            }
+        }
+        val editing = editOrderKeys
+        if (editing != null) {
+            buildList {
+                editing.forEach { key -> byKey[key]?.let { add(it) } }
+                canonical.forEach { app -> if (none { appKey(it) == appKey(app) }) add(app) }
+            }
+        } else {
+            val dock = canonical.take(6)
+            val grid = canonical.drop(6)
+            fun sortProxy(app: DockApp): DockApp = app.folder?.members
+                ?.firstNotNullOfOrNull { member -> apps.firstOrNull { appKey(it) == member } } ?: app
+            val sortedGrid = when (appSort) {
+                DesktopPreferences.AppSort.CUSTOM -> grid
+                DesktopPreferences.AppSort.ALPHABETICAL -> {
+                    val collator = Collator.getInstance(Locale.CHINA)
+                    grid.sortedWith { left, right -> collator.compare(sortProxy(left).name, sortProxy(right).name) }
+                }
+                DesktopPreferences.AppSort.INSTALL_NEWEST -> grid.sortedByDescending { sortProxy(it).firstInstallTime }
+                DesktopPreferences.AppSort.INSTALL_OLDEST -> grid.sortedBy {
+                    val time = sortProxy(it).firstInstallTime
+                    if (time > 0L) time else Long.MAX_VALUE
+                }
+                DesktopPreferences.AppSort.SMART -> {
+                    val now = System.currentTimeMillis()
+                    grid.sortedByDescending { app ->
+                        val proxy = sortProxy(app)
+                        val installedAt = proxy.firstInstallTime
+                        val ageDays = ((now - installedAt).coerceAtLeast(0L) / 86_400_000.0)
+                        val newBoost = ((14.0 - ageDays).coerceAtLeast(0.0) / 14.0) * 1_000_000.0
+                        val usage = AppHomeFeatures.launchUsage(context, appKey(proxy))
+                        val recentDays = if (usage.lastUsedAt > 0L) (now - usage.lastUsedAt).coerceAtLeast(0L) / 86_400_000.0 else 365.0
+                        newBoost + usage.count * 10_000.0 + (30.0 - recentDays).coerceAtLeast(0.0) * 1_000.0
+                    }
+                }
+            }
+            dock + sortedGrid
+        }
+    }
+    LaunchedEffect(baseHomeEntries) {
+        if (baseHomeEntries.isNotEmpty() && AppHomeFeatures.homeOrder(context).isEmpty()) {
+            AppHomeFeatures.saveHomeOrder(context, baseHomeEntries.map(::appKey))
+            layoutRevision++
+        }
+    }
+    val dockApps = remember(homeEntries) { homeEntries.take(6) }
+    val gridApps = remember(homeEntries) { homeEntries.drop(6) }
     val gridRows = remember(gridApps, columns) { gridApps.chunked(columns) }
 
     val dockRefs = remember(first) { List(6) { if (it == 0) first else FocusRequester() } }
+    val stagingFocusRequester = remember { FocusRequester() }
     val gridRefs = remember(gridRows) {
         gridRows.map { row -> List(row.size) { FocusRequester() } }
     }
     val gridListState = rememberLazyListState()
+    LaunchedEffect(expanded) {
+        if (!expanded) gridListState.scrollToItem(0)
+    }
     val navJobHolder = remember { object { var job: Job? = null } }
+
+    fun saveLayout(keys: List<String>) {
+        AppHomeFeatures.saveHomeOrder(context, keys)
+        DesktopPreferences.AppSort.save(context, DesktopPreferences.AppSort.CUSTOM)
+        layoutRevision++
+    }
+
+    fun swapEditingApp(targetIndex: Int) {
+        val keys = editOrderKeys ?: return
+        val key = editingKey ?: return
+        val from = keys.indexOf(key)
+        if (from !in keys.indices || targetIndex !in keys.indices || from == targetIndex) return
+        editOrderKeys = keys.toMutableList().apply {
+            val displaced = this[targetIndex]
+            this[targetIndex] = key
+            this[from] = displaced
+        }
+    }
+
+    fun editingTarget(index: Int, key: Key): Int? {
+        val total = editOrderKeys?.size ?: return null
+        if (index !in 0 until total) return null
+        if (index < 6) return when (key) {
+            Key.DirectionLeft -> (index - 1).takeIf { it >= 0 }
+            Key.DirectionRight -> (index + 1).takeIf { it < minOf(6, total) }
+            Key.DirectionDown -> {
+                val firstGridSize = minOf(columns, total - 6)
+                if (firstGridSize <= 0) null else 6 + (index * firstGridSize / minOf(6, total)).coerceIn(0, firstGridSize - 1)
+            }
+            else -> null
+        }
+        val relative = index - 6
+        val row = relative / columns
+        val col = relative % columns
+        return when (key) {
+            Key.DirectionLeft -> (index - 1).takeIf { col > 0 }
+            Key.DirectionRight -> (index + 1).takeIf { col < columns - 1 && it < total }
+            Key.DirectionUp -> if (row == 0) (col * minOf(6, total) / columns).coerceIn(0, minOf(6, total) - 1) else index - columns
+            Key.DirectionDown -> (index + columns).takeIf { it < total }
+            else -> null
+        }
+    }
+
+    fun handleEditingKey(event: androidx.compose.ui.input.key.KeyEvent, index: Int): Boolean {
+        if (editOrderKeys == null) return false
+        val confirm = event.key == Key.Enter || event.key == Key.NumPadEnter || event.key == Key.DirectionCenter || event.key == Key.Spacebar
+        if (confirm) {
+            if (event.type == KeyEventType.KeyDown) {
+                editOrderKeys?.let(::saveLayout)
+                editOrderKeys = null
+                editingKey = null
+            }
+            return true
+        }
+        if (event.type == KeyEventType.KeyDown) {
+            editingTarget(index, event.key)?.let(::swapEditingApp)
+            if (event.key == Key.DirectionLeft || event.key == Key.DirectionRight ||
+                event.key == Key.DirectionUp || event.key == Key.DirectionDown) return true
+        }
+        return false
+    }
+
+    fun placeInDock(targetIndex: Int) {
+        val key = dockPlacementKey ?: return
+        val keys = homeEntries.map(::appKey).toMutableList()
+        val source = keys.indexOf(key)
+        if (source !in keys.indices || targetIndex !in 0 until minOf(6, keys.size)) return
+        val displaced = keys[targetIndex]
+        keys[targetIndex] = key
+        keys[source] = displaced
+        saveLayout(keys)
+        dockPlacementKey = null
+    }
 
     DisposableEffect(Unit) {
         registerReturnToTop {
@@ -410,19 +830,167 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
         }
         onDispose { registerReturnToTop(null) }
     }
+    DisposableEffect(gridRefs) {
+        registerOpenAppList {
+            expanded = true
+            scope.launch {
+                withFrameNanos { }
+                runCatching { gridRefs.firstOrNull()?.firstOrNull()?.requestFocus() }
+            }
+        }
+        onDispose { registerOpenAppList(null) }
+    }
 
-    BackHandler(enabled = expanded) {
-        expanded = false
-        dockRefs[0].requestFocus()
+    BackHandler(enabled = !inputBlocked && (folderAddMode != null || expanded || editOrderKeys != null || dockPlacementKey != null || activeMenu != null || activeFolderMenu != null)) {
+        when {
+            folderAddMode != null -> {
+                if (stagedFolderKeys.isNotEmpty()) stagedFolderKeys.removeAt(stagedFolderKeys.lastIndex)
+                else folderAddMode = null
+            }
+            activeMenu != null -> {
+                // 返回只关闭长按菜单（焦点恢复由 menuReturnKey 机制在菜单销毁后完成）
+                val app = activeMenu
+                activeMenu = null
+                activeMenuBounds = null
+                menuClosing = false
+                if (app != null) menuReturnKey = appKey(app)
+            }
+            activeFolderMenu != null -> {
+                activeFolderMenu?.requester?.let { requester -> scope.launch {
+                    activeFolderMenu = null
+                    withFrameNanos { }
+                    runCatching { requester.requestFocus() }
+                } }
+                activeFolderMenu = null
+            }
+            editOrderKeys != null -> {
+                editOrderKeys = null
+                editingKey = null
+                dockRefs[0].requestFocus()
+            }
+            dockPlacementKey != null -> {
+                dockPlacementKey = null
+                dockRefs[0].requestFocus()
+            }
+            else -> {
+                expanded = false
+                dockRefs[0].requestFocus()
+            }
+        }
+    }
+
+    // 长按菜单关闭后，把焦点还原到打开菜单的那个应用图标。菜单销毁会打断关闭瞬间的
+    // requestFocus，所以等菜单真正离开组合后再聚焦，并带重试兜底。
+    LaunchedEffect(menuReturnKey) {
+        val key = menuReturnKey ?: return@LaunchedEffect
+        withFrameNanos { }
+        withFrameNanos { }
+        val idx = homeEntries.indexOfFirst { appKey(it) == key }
+        var restored = false
+        if (idx in 0..5) {
+            restored = runCatching { dockRefs.getOrNull(idx)?.requestFocus() }.getOrNull() ?: false
+        } else if (idx >= 6) {
+            restored = runCatching {
+                gridRefs.getOrNull((idx - 6) / columns)?.getOrNull((idx - 6) % columns)?.requestFocus()
+            }.getOrNull() ?: false
+        }
+        if (!restored) runCatching { dockRefs.getOrNull(0)?.requestFocus() }
+        menuReturnKey = null
+    }
+
+    LaunchedEffect(editOrderKeys, editingKey, gridRefs) {
+        val key = editingKey ?: return@LaunchedEffect
+        val index = editOrderKeys?.indexOf(key) ?: return@LaunchedEffect
+        withFrameNanos { }
+        if (index < 6) dockRefs.getOrNull(index)?.requestFocus()
+        else gridRefs.getOrNull((index - 6) / columns)?.getOrNull((index - 6) % columns)?.requestFocus()
+    }
+
+    LaunchedEffect(dockPlacementKey) {
+        if (dockPlacementKey != null) {
+            withFrameNanos { }
+            dockRefs.firstOrNull()?.requestFocus()
+        }
     }
 
     var dockPosition by remember { mutableStateOf(Offset.Zero) }
 
+    var pendingLaunchBounds by remember { mutableStateOf<Rect?>(null) }
+
+    fun openEntry(app: DockApp, bounds: Rect? = null) {
+        val folder = app.folder
+        // The folder is already focused when activated. Morph from its visible focused bounds,
+        // otherwise the first frame visibly snaps down to the unselected tile size.
+        val focusedBounds = folder?.let { folderAnchors[it.id]?.visual } ?: bounds ?: Rect.Zero
+        val adding = folderAddMode
+        if (adding != null) {
+            if (folder != null && folder.id != adding.target.id) {
+                folderToOpen = OpenFolderRequest(folder, focusedBounds, picking = true)
+            } else if (folder == null) {
+                val key = appKey(app)
+                if (key !in adding.target.members && key !in stagedFolderKeys) stagedFolderKeys.add(key)
+            }
+            return
+        }
+        if (folder != null) {
+            returningFolderId = null
+            folderToOpen = OpenFolderRequest(folder, focusedBounds)
+        } else if (appKey(app) in AppHomeFeatures.locked(context)) {
+            pendingPinApp = app
+            pendingLaunchBounds = bounds
+            pinMode = if (AppHomeFeatures.hasPin(context)) "verify_launch" else "setup_launch"
+        } else {
+            AppHomeFeatures.recordLaunch(context, appKey(app))
+            launchAppWithClipReveal(context, view, bounds, app.launch)
+            DetailOrigin.retainedFocus = null
+        }
+    }
+
+    fun addWidget(provider: AppWidgetProviderInfo, width: Int, height: Int) {
+        val id = widgetHost.allocateAppWidgetId()
+        val options = android.os.Bundle().apply {
+            putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, width)
+            putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, width)
+            putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, height)
+            putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, height)
+        }
+        if (widgetManager.bindAppWidgetIdIfAllowed(id, provider.provider, options)) {
+            val pending = PendingWidgetBind(id, provider, width, height)
+            if (provider.configure != null) {
+                pendingWidgetBind = pending.copy(configuring = true)
+                widgetConfigLauncher.launch(Intent(AppWidgetManager.ACTION_APPWIDGET_CONFIGURE).setComponent(provider.configure)
+                    .putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id)
+                    .putExtra(AppWidgetManager.EXTRA_APPWIDGET_PROVIDER, provider.provider)
+                    .putExtra(AppWidgetManager.EXTRA_APPWIDGET_OPTIONS, options))
+            } else persistWidget(pending)
+        } else {
+            pendingWidgetBind = PendingWidgetBind(id, provider, width, height)
+            widgetBindLauncher.launch(Intent(AppWidgetManager.ACTION_APPWIDGET_BIND)
+                .putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id)
+                .putExtra(AppWidgetManager.EXTRA_APPWIDGET_PROVIDER, provider.provider)
+                .putExtra(AppWidgetManager.EXTRA_APPWIDGET_OPTIONS, options))
+        }
+    }
+
     val dockTargetY = 40.dp
     val dockInitialY = (canvasHeight - dockHeight - 40.dp).coerceAtLeast(40.dp)
-    val dockY = dockInitialY - (dockInitialY - dockTargetY) * progress
+    val dockTravel = dockInitialY - dockTargetY
 
+    Box(Modifier.fillMaxSize().zIndex(1f)) {
     Box(Modifier.fillMaxSize()) {
+
+        if (editOrderKeys != null || dockPlacementKey != null) {
+            val message = if (editOrderKeys != null) "桌面编辑 · 方向键移动 · OK 保存 · 返回取消"
+                else "选择 Dock 位置 · OK 互换 · 返回取消"
+            Box(
+                Modifier.align(Alignment.TopCenter).padding(top = 112.dp).zIndex(900f)
+                    .clip(RoundedCornerShape(18.dp)).background(Color(0xD9202227))
+                    .border(1.dp, Color.White.copy(alpha = .24f), RoundedCornerShape(18.dp))
+                    .padding(horizontal = 22.dp, vertical = 10.dp)
+            ) {
+                Text(message, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Medium)
+            }
+        }
 
         // Hero Clock Area: slides up and fades out
         Box(
@@ -430,17 +998,26 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                 .graphicsLayer {
                     alpha = (1f - progress * 1.5f).coerceIn(0f, 1f)
                     translationY = -140.dp.toPx() * progress
-                },
+                }.then(if (RenderPerformance.blur31) Modifier.hazeSource(menuHaze, zIndex = 1f) else Modifier),
             contentAlignment = Alignment.Center
         ) {
             HomeClock(clockStyle)
         }
 
-        // Dock Row (Top Shelf): moves smoothly from bottom to top
+        // Dock and apps share one scroll surface; the dock is a normal first item.
+        LazyColumn(
+            state = gridListState,
+            modifier = Modifier.align(Alignment.TopCenter).offset(y = dockTargetY)
+                .width(1584.dp).height((canvasHeight - dockTargetY).coerceAtLeast(0.dp))
+                .graphicsLayer { translationY = dockTravel.toPx() * (1f - progress) }
+                .then(if (RenderPerformance.blur31) Modifier.hazeSource(menuHaze, zIndex = 2f) else Modifier),
+            userScrollEnabled = expanded && !inputBlocked,
+            contentPadding = PaddingValues(bottom = if (showGrid) 60.dp else 0.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+        item(key = "home-dock") {
         Box(
-            Modifier.align(Alignment.TopCenter)
-                .offset(y = dockY)
-                .width(1584.dp)
+            Modifier.width(1584.dp)
                 .height(dockHeight)
         ) {
             val currentDockTint = Color.Black.copy(alpha = dockOpacity.coerceIn(0f, .9f))
@@ -472,14 +1049,15 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                     DesktopPreferences.DockStyle.TRANSLUCENT -> {
                         Box(
                             Modifier.fillMaxSize()
-                                .background(Color.Black.copy(alpha = 0.48f + 0.2f * progress))
+                                .drawBehind { drawRect(Color.Black.copy(alpha = 0.48f + 0.2f * progress)) }
                                 .border(1.dp, Color.White.copy(alpha = 0.12f), shape)
                         )
                     }
                 }
             }
             Row(
-                Modifier.fillMaxSize().padding(horizontal = 34.dp, vertical = cardPaddingV),
+                Modifier.fillMaxSize()
+                    .padding(horizontal = 34.dp, vertical = cardPaddingV),
                 horizontalArrangement = Arrangement.spacedBy(34.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -493,10 +1071,25 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                                 .focusProperties {
                                     up = if (!expanded) navigation else FocusRequester.Default
                                     left = if (index > 0) dockRefs[index - 1] else FocusRequester.Cancel
-                                    right = if (index < 5 && index < dockApps.lastIndex) dockRefs[index + 1] else FocusRequester.Cancel
+                                    right = if (index < 5 && index < dockApps.lastIndex) dockRefs[index + 1]
+                                        else if (folderAddMode != null) stagingFocusRequester else FocusRequester.Cancel
                                 }
                                 .onPreviewKeyEvent { event ->
+                                    if (handleEditingKey(event, index)) return@onPreviewKeyEvent true
+                                    if (dockPlacementKey != null) {
+                                        val confirm = event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter || event.key == Key.Spacebar
+                                        if (confirm) {
+                                            if (event.type == KeyEventType.KeyDown) placeInDock(index)
+                                            return@onPreviewKeyEvent true
+                                        }
+                                        if (event.key == Key.DirectionUp || event.key == Key.DirectionDown) return@onPreviewKeyEvent true
+                                    }
                                     if (event.type == KeyEventType.KeyDown) {
+                                        val code = event.nativeKeyEvent.keyCode
+                                        if (code == android.view.KeyEvent.KEYCODE_DPAD_CENTER || code == android.view.KeyEvent.KEYCODE_ENTER ||
+                                            code == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER || code == android.view.KeyEvent.KEYCODE_SPACE) {
+                                            lastConfirmKeyDownAt = SystemClock.elapsedRealtime()
+                                        }
                                         if (event.key == Key.DirectionUp) {
                                             if (expanded) {
                                                 expanded = false
@@ -513,13 +1106,8 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                                                 navJobHolder.job = scope.launch {
                                                     val ref = gridRefs.getOrNull(0)?.getOrNull(targetCol)
                                                     if (ref == null || !runCatching { ref.requestFocus() }.isSuccess) {
-                                                        var attempts = 0
-                                                        while (attempts < 20) {
-                                                            withFrameNanos { }
-                                                            val r = gridRefs.getOrNull(0)?.getOrNull(targetCol)
-                                                            if (r != null && runCatching { r.requestFocus() }.isSuccess) break
-                                                            attempts++
-                                                        }
+                                                        withFrameNanos { }
+                                                        gridRefs.getOrNull(0)?.getOrNull(targetCol)?.requestFocus()
                                                     }
                                                 }
                                                 true
@@ -532,13 +1120,52 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                                 },
                             radius = (22.dp * scale).coerceAtLeast(16.dp),
                             showBorder = false,
-                            uniformExpansionDp = 10.dp,
-                            onClick = {
-                                launchAppWithClipReveal(context, view, null, app.launch)
-                                DetailOrigin.retainedFocus = null
-                            }
+                            useAppCornerPreference = true,
+                            uniformExpansionDp = if (editingKey == appKey(app)) 18.dp else 10.dp,
+                            forceHighlight = (forceHighlightKey != null && forceHighlightKey == appKey(app)) ||
+                                (app.folder != null && (folderToOpen?.folder?.id == app.folder.id || returningFolderId == app.folder.id)),
+                            onVisualBoundsChanged = { base, visual -> updateFolderAnchor(app.folder, base, visual) },
+                            onClick = {},
+                            onClickWithBounds = { bounds ->
+                                when {
+                                    dockPlacementKey != null -> placeInDock(index)
+                                    editOrderKeys != null -> {
+                                        editOrderKeys?.let(::saveLayout)
+                                        editOrderKeys = null
+                                        editingKey = null
+                                    }
+                                    else -> {
+                                        if (app.folder != null) dockRefs[index].requestFocus()
+                                        openEntry(app, bounds)
+                                    }
+                                }
+                            },
+                            onMenuKey = { bounds, requester ->
+                                if (editOrderKeys == null && dockPlacementKey == null) {
+                                    if (app.folder != null) showFolderContextMenu(app.folder, bounds, requester)
+                                    else showContextMenu(app, bounds, requester)
+                                }
+                            },
+                            onContextClick = { bounds, requester ->
+                                if (editOrderKeys == null && dockPlacementKey == null) app.folder?.let {
+                                    showFolderContextMenu(it, bounds, requester)
+                                }
+                            },
+                            onLongClick = { bounds -> if (editOrderKeys == null && dockPlacementKey == null) {
+                                suppressMenuOpeningRelease = SystemClock.elapsedRealtime() - lastConfirmKeyDownAt < 1500L
+                                if (app.folder != null) showFolderContextMenu(app.folder, bounds, dockRefs[index])
+                                else showContextMenu(app, bounds, dockRefs[index])
+                            } }
                         ) {
-                            if (visualApp.banner != null) {
+                            if (visualApp.folder != null) {
+                                DisposableEffect(visualApp.folder.id) {
+                                    onDispose { folderAnchors.remove(visualApp.folder.id) }
+                                }
+                                FolderTile(visualApp.folder, apps, Modifier.fillMaxSize()
+                                    .graphicsLayer { alpha = if (folderSourceHidden(visualApp.folder)) 0f else 1f })
+                            } else if (visualApp.customIcon != null) {
+                                Image(visualApp.customIcon, visualApp.name, Modifier.align(Alignment.Center).size(artworkSize), contentScale = ContentScale.Fit)
+                            } else if (visualApp.banner != null) {
                                 Box(Modifier.fillMaxSize().background(Color(visualApp.bannerBgColor)))
                                 Image(visualApp.banner, visualApp.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                             } else if (visualApp.icon != null) {
@@ -555,25 +1182,12 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
             }
         }
 
-        // App Grid: positioned directly below the Dock, slides up together with the Dock
-        val gridTop = dockY + dockHeight + 4.dp
-        if ((expanded || progress > 0.001f) && gridRows.isNotEmpty()) {
-            Box(
-                Modifier.align(Alignment.TopCenter)
-                    .offset(y = gridTop)
-                    .width(1584.dp)
-                    .height((canvasHeight - gridTop).coerceAtLeast(0.dp))
-                    .graphicsLayer { alpha = progress }
-            ) {
-                LazyColumn(
-                    state = gridListState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(top = 16.dp, bottom = 60.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
+        }
+        // Application rows continue below the dock in the same LazyColumn.
+        if (showGrid && gridRows.isNotEmpty()) {
                     itemsIndexed(gridRows, key = { index, _ -> "grid-row-$index" }) { r, rowApps ->
                         Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 34.dp),
+                            Modifier.fillMaxWidth().graphicsLayer { alpha = progress }.padding(horizontal = 34.dp),
                             horizontalArrangement = Arrangement.spacedBy(if (columns == 7) 20.dp else 34.dp),
                             verticalAlignment = Alignment.Top
                         ) {
@@ -582,18 +1196,34 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                                 if (app != null) {
                                     GridAppItem(
                                         app = app,
+                                        folderAlpha = if (folderSourceHidden(app.folder)) 0f else 1f,
+                                        folderApps = apps,
+                                        onFolderVisualBounds = { base, visual -> updateFolderAnchor(app.folder, base, visual) },
+                                        onFolderDetached = { app.folder?.let { folderAnchors.remove(it.id) } },
                                         iconScale = scale,
+                                        editing = editingKey == appKey(app),
+                                        forceHighlight = (forceHighlightKey != null && forceHighlightKey == appKey(app)) ||
+                                            (app.folder != null && (folderToOpen?.folder?.id == app.folder.id || returningFolderId == app.folder.id)),
                                         modifier = Modifier.weight(1f),
                                         cardModifier = Modifier
                                             .focusRequester(gridRefs.getOrNull(r)?.getOrNull(col) ?: FocusRequester())
                                             .focusProperties {
                                                 left = if (col > 0) gridRefs.getOrNull(r)?.getOrNull(col - 1) ?: FocusRequester.Cancel else FocusRequester.Cancel
-                                                right = if (col < rowApps.lastIndex) gridRefs.getOrNull(r)?.getOrNull(col + 1) ?: FocusRequester.Cancel else FocusRequester.Cancel
+                                                right = if (col < rowApps.lastIndex) gridRefs.getOrNull(r)?.getOrNull(col + 1) ?: FocusRequester.Cancel
+                                                    else if (folderAddMode != null) stagingFocusRequester else FocusRequester.Cancel
                                                 up = FocusRequester.Cancel
                                                 down = FocusRequester.Cancel
                                             }
                                             .onPreviewKeyEvent { event ->
+                                                val globalIndex = 6 + r * columns + col
+                                                if (handleEditingKey(event, globalIndex)) return@onPreviewKeyEvent true
+                                                if (dockPlacementKey != null) return@onPreviewKeyEvent true
                                                 if (event.type == KeyEventType.KeyDown) {
+                                                    val code = event.nativeKeyEvent.keyCode
+                                                    if (code == android.view.KeyEvent.KEYCODE_DPAD_CENTER || code == android.view.KeyEvent.KEYCODE_ENTER ||
+                                                        code == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER || code == android.view.KeyEvent.KEYCODE_SPACE) {
+                                                        lastConfirmKeyDownAt = SystemClock.elapsedRealtime()
+                                                    }
                                                     val isRepeat = event.nativeKeyEvent.repeatCount > 0
                                                     if (event.key == Key.DirectionDown) {
                                                         if (r < gridRows.lastIndex) {
@@ -603,14 +1233,14 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                                                             navJobHolder.job = scope.launch {
                                                                 runCatching {
                                                                     val layoutInfo = gridListState.layoutInfo
-                                                                    val visible = layoutInfo.visibleItemsInfo.find { it.index == nextRow }
+                                                                    val visible = layoutInfo.visibleItemsInfo.find { it.index == nextRow + 1 }
                                                                     val isCompletelyVisible = visible != null && (visible.offset + visible.size <= layoutInfo.viewportEndOffset - with(density) { 24.dp.toPx() })
                                                                     if (!isCompletelyVisible) {
                                                                         val scrollDistance = with(density) { (cardHeight + 78.dp).toPx() }
                                                                         if (isRepeat) {
                                                                             gridListState.scrollBy(scrollDistance)
                                                                         } else {
-                                                                            gridListState.animateScrollBy(scrollDistance, tween<Float>(120))
+                                                                            gridListState.animateScrollBy(scrollDistance, tween<Float>(RenderPerformance.duration(120)))
                                                                         }
                                                                     }
                                                                     val targetRef = gridRefs.getOrNull(nextRow)?.getOrNull(targetCol)
@@ -639,14 +1269,14 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                                                             navJobHolder.job = scope.launch {
                                                                 runCatching {
                                                                     val layoutInfo = gridListState.layoutInfo
-                                                                    val visible = layoutInfo.visibleItemsInfo.find { it.index == prevRow }
+                                                                    val visible = layoutInfo.visibleItemsInfo.find { it.index == prevRow + 1 }
                                                                     val isCompletelyVisible = visible != null && (visible.offset >= layoutInfo.viewportStartOffset + with(density) { 16.dp.toPx() })
                                                                     if (!isCompletelyVisible) {
                                                                         val scrollDistance = -with(density) { (cardHeight + 78.dp).toPx() }
                                                                         if (isRepeat) {
                                                                             gridListState.scrollBy(scrollDistance)
                                                                         } else {
-                                                                            gridListState.animateScrollBy(scrollDistance, tween<Float>(120))
+                                                                            gridListState.animateScrollBy(scrollDistance, tween<Float>(RenderPerformance.duration(120)))
                                                                         }
                                                                     }
                                                                     val targetRef = gridRefs.getOrNull(prevRow)?.getOrNull(targetCol)
@@ -681,10 +1311,33 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                                                 }
                                                 false
                                             },
-                                        onClick = {
-                                            launchAppWithClipReveal(context, view, null, app.launch)
-                                            DetailOrigin.retainedFocus = null
-                                        }
+                                        onClick = { bounds ->
+                                            if (editOrderKeys != null) {
+                                                editOrderKeys?.let(::saveLayout)
+                                                editOrderKeys = null
+                                                editingKey = null
+                                            } else if (dockPlacementKey == null) {
+                                                if (app.folder != null) gridRefs.getOrNull(r)?.getOrNull(col)?.requestFocus()
+                                                openEntry(app, bounds)
+                                            }
+                                        },
+                                        onMenuKey = { bounds, requester ->
+                                            if (editOrderKeys == null && dockPlacementKey == null) {
+                                                if (app.folder != null) showFolderContextMenu(app.folder, bounds, requester)
+                                                else showContextMenu(app, bounds, requester)
+                                            }
+                                        },
+                                        onContextClick = { bounds, requester ->
+                                            if (editOrderKeys == null && dockPlacementKey == null) app.folder?.let {
+                                                showFolderContextMenu(it, bounds, requester)
+                                            }
+                                        },
+                                        onLongClick = { bounds -> if (editOrderKeys == null && dockPlacementKey == null) {
+                                                suppressMenuOpeningRelease = SystemClock.elapsedRealtime() - lastConfirmKeyDownAt < 1500L
+                                                val requester = gridRefs.getOrNull(r)?.getOrNull(col)
+                                                if (app.folder != null) showFolderContextMenu(app.folder, bounds, requester)
+                                                else showContextMenu(app, bounds, requester)
+                                        } }
                                     )
                                 } else {
                                     Spacer(Modifier.weight(1f))
@@ -692,11 +1345,352 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                             }
                         }
                     }
-                    item(key = "grid-bottom-space") {
-                        Spacer(Modifier.height(60.dp))
+        }
+        }
+
+        widgets.forEach { widget ->
+            val info = remember(widget.provider) {
+                val component = ComponentName.unflattenFromString(widget.provider)
+                widgetManager.installedProviders.firstOrNull { it.provider == component }
+            } ?: return@forEach
+            val widgetOffset = remember(widget.id) { mutableStateOf(Offset(widget.xDp.toFloat(), widget.yDp.toFloat())) }
+            AndroidView(
+                factory = { hostContext ->
+                    widgetHost.createView(hostContext, widget.id, info).apply {
+                        setAppWidget(widget.id, info)
+                        updateAppWidgetSize(android.os.Bundle(), widget.widthDp, widget.heightDp, widget.widthDp, widget.heightDp)
+                    }
+                },
+                modifier = Modifier.offset { IntOffset(with(density) { widgetOffset.value.x.dp.roundToPx() }, with(density) { widgetOffset.value.y.dp.roundToPx() }) }
+                    .size(widget.widthDp.dp, widget.heightDp.dp)
+                    .pointerInput(widget.id) {
+                        detectDragGestures(onDragEnd = {
+                            val moved = widget.copy(xDp = widgetOffset.value.x.roundToInt(), yDp = widgetOffset.value.y.roundToInt())
+                            widgets = widgets.map { if (it.id == moved.id) moved else it }
+                            AppHomeFeatures.saveWidgets(context, widgets)
+                        }) { change, drag ->
+                            change.consume()
+                            widgetOffset.value = widgetOffset.value + Offset(drag.x / density.density, drag.y / density.density)
+                        }
+                    }
+            )
+        }
+
+        folderAddMode?.let { mode ->
+            val stagedApps = stagedFolderKeys.mapNotNull { key -> apps.firstOrNull { appKey(it) == key } }
+            FolderStagingTray(
+                apps = stagedApps,
+                target = mode.targetBounds.center,
+                completing = stagingCompleting,
+                focusRequester = stagingFocusRequester,
+                onComplete = { stagingCompleting = true },
+                onAnimationFinished = {
+                    AppHomeFeatures.moveIntoFolder(context, mode.target.id, stagedFolderKeys.toList())
+                    stagedFolderKeys.clear()
+                    stagingCompleting = false
+                    folderAddMode = null
+                    featureRevision++
+                },
+                modifier = Modifier.align(Alignment.CenterEnd).padding(end = 30.dp).zIndex(950f)
+            )
+        }
+
+        activeFolderMenu?.let { request ->
+            FolderContextMenu(
+                folder = request.folder,
+                anchor = request.bounds,
+                onDismiss = {
+                    activeFolderMenu = null
+                    scope.launch { withFrameNanos { }; runCatching { request.requester?.requestFocus() } }
+                },
+                onAddApps = {
+                    activeFolderMenu = null
+                    stagedFolderKeys.clear()
+                    folderAddMode = FolderAddMode(request.folder, request.bounds)
+                },
+                onDissolve = {
+                    AppHomeFeatures.dissolveFolder(context, request.folder.id)
+                    activeFolderMenu = null
+                    featureRevision++
+                    scope.launch {
+                        withFrameNanos { }
+                        dockRefs.firstOrNull()?.requestFocus()
                     }
                 }
-            }
+            )
+        }
+
+        activeMenu?.let { app ->
+            AppContextMenu(
+                app = app,
+                anchor = activeMenuBounds ?: Rect.Zero,
+                isInDock = dockApps.any { appKey(it) == appKey(app) },
+                suppressOpeningConfirmRelease = suppressMenuOpeningRelease,
+                wallpaperHaze = menuHaze,
+                staticBlur = staticBlur,
+                onCloseStarted = {
+                    // 关闭动画一开始就把焦点交还原图标：方向键立刻可用。
+                    // （菜单 onExit 守卫在 closing 时放行，这里才收得回来。）
+                    menuClosing = true
+                    val idx = homeEntries.indexOfFirst { appKey(it) == appKey(app) }
+                    val restoredByRequester = menuReturnRequester?.let { requester ->
+                        runCatching { requester.requestFocus() }.getOrDefault(false)
+                    } == true
+                    val restored = restoredByRequester || when {
+                        idx in 0..5 -> runCatching { dockRefs.getOrNull(idx)?.requestFocus() }.getOrNull() ?: false
+                        idx >= 6 -> runCatching {
+                            gridRefs.getOrNull((idx - 6) / columns)?.getOrNull((idx - 6) % columns)?.requestFocus()
+                        }.getOrNull() ?: false
+                        else -> false
+                    }
+                    if (restoredByRequester) menuReturnRequester = null
+                    // 立即恢复失败才走菜单销毁后的兜底恢复，避免用户在动画期间已移焦被抢回
+                    if (!restored) menuReturnKey = appKey(app)
+                },
+                onDismiss = { activeMenu = null; activeMenuBounds = null; menuClosing = false; menuReturnRequester = null },
+                onAppInfo = {
+                    activeMenu = null
+                    context.startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${app.packageName}")))
+                },
+                onCreateFolder = {
+                    activeMenu = null
+                    folderAnimation = FolderCreateRequest(app, activeMenuBounds ?: Rect.Zero)
+                },
+                onToggleLock = {
+                    val isLocked = appKey(app) in AppHomeFeatures.locked(context)
+                    if (isLocked && AppHomeFeatures.hasPin(context)) {
+                        pendingPinApp = app; pinMode = "verify_unlock"
+                    } else if (isLocked) {
+                        AppHomeFeatures.setLocked(context, appKey(app), false); featureRevision++; activeMenu = null
+                    } else if (!AppHomeFeatures.hasPin(context)) {
+                        pendingPinApp = app; pinMode = "setup_lock"; activeMenu = null
+                    } else {
+                        AppHomeFeatures.setLocked(context, appKey(app), true); featureRevision++; activeMenu = null
+                    }
+                },
+                onUninstall = {
+                    activeMenu = null
+                    val uninstallIntent = Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:${app.packageName}"))
+                        .putExtra(Intent.EXTRA_RETURN_RESULT, false)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    runCatching { context.startActivity(uninstallIntent) }
+                        .recoverCatching {
+                            context.startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:${app.packageName}"))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                        }
+                },
+                onWidgets = { activeMenu = null; widgetOwner = app },
+                onHide = {
+                    activeMenu = null
+                    AppHomeFeatures.setHidden(context, appKey(app), true)
+                    featureRevision++
+                },
+                onDesktopEdit = {
+                    val keys = homeEntries.map(::appKey)
+                    editOrderKeys = keys
+                    editingKey = appKey(app)
+                    activeMenu = null
+                    expanded = true
+                },
+                onDockAction = {
+                    val keys = homeEntries.map(::appKey)
+                    val index = keys.indexOf(appKey(app))
+                    if (index in 0..5) {
+                        if (keys.size > 6) {
+                            val moved = keys.toMutableList()
+                            val firstGrid = moved[6]
+                            moved[6] = moved[index]
+                            moved[index] = firstGrid
+                            saveLayout(moved)
+                        }
+                    } else if (index >= 6) {
+                        dockPlacementKey = appKey(app)
+                        expanded = true
+                    }
+                    activeMenu = null
+                },
+                onIconEdit = { activeMenu = null; iconEditApp = app },
+                onShortcut = { shortcut ->
+                    activeMenu = null
+                    runCatching {
+                        val launcherApps = context.getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
+                        launcherApps.startShortcut(app.packageName, shortcut.id, null, null, Process.myUserHandle())
+                    }
+                }
+            )
+        }
+
+        iconEditApp?.let { app ->
+            IconEditorDialog(
+                app = app,
+                currentName = AppHomeFeatures.customLabel(context, appKey(app)) ?: app.name,
+                currentIcon = AppHomeFeatures.customIcon(context, appKey(app)),
+                onDismiss = { iconEditApp = null },
+                onChooseImage = { iconPicker.launch("image/*") },
+                onSaveName = { name ->
+                    AppHomeFeatures.saveCustomLabel(context, appKey(app), name.takeIf { it != app.name })
+                    featureRevision++
+                    iconEditApp = null
+                },
+                onReset = {
+                    AppHomeFeatures.saveCustomLabel(context, appKey(app), null)
+                    AppHomeFeatures.clearCustomIcon(context, appKey(app))
+                    featureRevision++
+                    iconEditApp = null
+                }
+            )
+        }
+
+        folderAnimation?.let { request ->
+            FolderCreateAnimation(request, onFinished = {
+                val app = request.app
+                val folder = HomeFolder("folder-${System.currentTimeMillis()}", "新建文件夹", listOf(appKey(app)))
+                AppHomeFeatures.saveFolder(context, folder)
+                val folderKey = "folder.${folder.id}/${folder.id}"
+                val order = AppHomeFeatures.homeOrder(context).toMutableList()
+                val sourceIndex = order.indexOf(appKey(app))
+                if (sourceIndex >= 0) order[sourceIndex] = folderKey else {
+                    val visibleIndex = homeEntries.indexOfFirst { appKey(it) == appKey(app) }
+                    val current = homeEntries.map(::appKey).toMutableList()
+                    if (visibleIndex >= 0) current[visibleIndex] = folderKey
+                    order.clear(); order.addAll(current)
+                }
+                AppHomeFeatures.saveHomeOrder(context, order)
+                featureRevision++
+                folderAnimation = null
+            }, onDismiss = { folderAnimation = null })
+        }
+
+    }
+        FolderMorphHost(
+            entries = (dockApps + gridRows.flatten()).filter { it.folder != null }.distinctBy { it.folder?.id },
+            anchors = folderAnchors,
+            activeRequest = folderToOpen,
+            menuHaze = menuHaze,
+            apps = apps,
+            wallpaperImage = staticBlur,
+            excludedKeys = stagedFolderKeys.toSet(),
+            onReady = { folderLayerReady = true },
+            onProgress = onFolderOverlayProgress,
+            onFolderClick = { app ->
+                val folderId = app.folder?.id
+                if (folderId != null) {
+                    val dockIndex = dockApps.indexOfFirst { it.folder?.id == folderId }
+                    val ref = if (dockIndex >= 0) dockRefs[dockIndex] else {
+                        val gridIndex = gridRows.flatten().indexOfFirst { it.folder?.id == folderId }
+                        if (gridIndex >= 0) gridRefs.getOrNull(gridIndex / columns)?.getOrNull(gridIndex % columns) else null
+                    }
+                    ref?.requestFocus()
+                }
+                openEntry(app, folderId?.let { folderAnchors[it]?.base })
+            },
+            onMenu = { app, bounds, requester -> showContextMenu(app, bounds, requester) },
+            onClosing = { request ->
+                returningFolderId = request.folder.id
+                val dockIndex = dockApps.indexOfFirst { it.folder?.id == request.folder.id }
+                val ref = if (dockIndex >= 0) dockRefs[dockIndex] else {
+                    val gridIndex = gridRows.flatten().indexOfFirst { it.folder?.id == request.folder.id }
+                    if (gridIndex >= 0) gridRefs.getOrNull(gridIndex / columns)?.getOrNull(gridIndex % columns) else null
+                }
+                ref?.requestFocus()
+            },
+            onDismiss = { request ->
+                    folderToOpen = null
+                    onFolderOverlayProgress(0f)
+                    scope.launch {
+                        repeat(20) {
+                            withFrameNanos { }
+                            val dockIndex = dockApps.indexOfFirst { it.folder?.id == request.folder.id }
+                            val ref = if (dockIndex >= 0) dockRefs[dockIndex] else {
+                                val gridIndex = gridRows.flatten().indexOfFirst { it.folder?.id == request.folder.id }
+                                if (gridIndex >= 0) gridRefs.getOrNull(gridIndex / columns)?.getOrNull(gridIndex % columns) else null
+                            }
+                            if (ref != null && runCatching { ref.requestFocus() }.getOrDefault(false)) {
+                                DetailOrigin.retainedFocus = null
+                                returningFolderId = null
+                                return@launch
+                            }
+                        }
+                        DetailOrigin.retainedFocus = null
+                        returningFolderId = null
+                    }
+                },
+            onAdd = { request ->
+                    folderToOpen = null
+                    onFolderOverlayProgress(0f)
+                    DetailOrigin.retainedFocus = null
+                    returningFolderId = null
+                    stagedFolderKeys.clear()
+                    folderAddMode = FolderAddMode(request.folder, request.bounds)
+                },
+            onPick = { selected ->
+                    val key = appKey(selected)
+                    if (key !in stagedFolderKeys) stagedFolderKeys.add(key)
+                },
+            onLaunch = { selected ->
+                    if (DesktopPreferences.FolderLaunchBehavior.current(context) ==
+                        DesktopPreferences.FolderLaunchBehavior.CLOSE) {
+                        folderToOpen = null
+                        onFolderOverlayProgress(0f)
+                        DetailOrigin.retainedFocus = null
+                        returningFolderId = null
+                    }
+                    if (appKey(selected) in AppHomeFeatures.locked(context)) {
+                        pendingPinApp = selected; pendingLaunchBounds = null; pinMode = "verify_launch"
+                    } else {
+                        AppHomeFeatures.recordLaunch(context, appKey(selected))
+                        launchAppWithClipReveal(context, view, null, selected.launch)
+                    }
+                }
+        )
+        pinMode?.let { mode ->
+            PinEntryDialog(mode = mode, onDismiss = { pinMode = null; pendingPinApp = null; pendingLaunchBounds = null }, onSubmit = { value ->
+                val app = pendingPinApp
+                when {
+                    mode.startsWith("setup") -> {
+                        if (mode.contains("confirm")) {
+                            if (value == pinFirstEntry) {
+                                AppHomeFeatures.setPin(context, value)
+                                if (mode.contains("lock")) app?.let { AppHomeFeatures.setLocked(context, appKey(it), true) }
+                                featureRevision++
+                                pinMode = null
+                                if (mode.contains("launch")) app?.let {
+                                    AppHomeFeatures.recordLaunch(context, appKey(it))
+                                    launchAppWithClipReveal(context, view, pendingLaunchBounds, it.launch)
+                                }
+                                pendingPinApp = null
+                                pendingLaunchBounds = null
+                            } else pinMode = "${mode}_mismatch"
+                        } else {
+                            pinFirstEntry = value
+                            pinMode = if (mode.contains("lock")) "setup_lock_confirm" else "setup_launch_confirm"
+                        }
+                    }
+                    mode.startsWith("verify_launch") && AppHomeFeatures.matchesPin(context, value) -> {
+                        pinMode = null; pendingPinApp = null; app?.let {
+                            AppHomeFeatures.recordLaunch(context, appKey(it))
+                            launchAppWithClipReveal(context, view, pendingLaunchBounds, it.launch)
+                        }
+                    }
+                    mode.startsWith("verify_unlock") && AppHomeFeatures.matchesPin(context, value) -> {
+                        app?.let { AppHomeFeatures.setLocked(context, appKey(it), false) }
+                        featureRevision++; pinMode = null; pendingPinApp = null; pendingLaunchBounds = null; activeMenu = null
+                    }
+                    else -> pinMode = if (mode.startsWith("verify_unlock")) "verify_unlock_error" else "verify_launch_error"
+                }
+            }) }
+        widgetOwner?.let { owner ->
+            val providers = remember(owner.packageName) { widgetManager.installedProviders.filter { it.provider.packageName == owner.packageName } }
+            WidgetProviderDialog(owner.name, providers, onDismiss = { widgetOwner = null }, onChoose = { chosen ->
+                chosenWidgetProvider = chosen
+                widgetOwner = null
+            })
+        }
+        chosenWidgetProvider?.let { provider ->
+            WidgetSizeDialog(provider, onDismiss = { chosenWidgetProvider = null }, onChoose = { width, height ->
+                addWidget(provider, width, height)
+                chosenWidgetProvider = null
+            })
         }
     }
 }
@@ -704,16 +1698,28 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
 @Composable
 private fun GridAppItem(
     app: DockApp,
+    folderApps: List<DockApp>,
+    folderAlpha: Float = 1f,
+    onFolderVisualBounds: (Rect, Rect) -> Unit = { _, _ -> },
+    onFolderDetached: () -> Unit = {},
     iconScale: Float = 1f,
+    editing: Boolean = false,
     modifier: Modifier = Modifier,
     cardModifier: Modifier = Modifier,
-    onClick: () -> Unit
+    forceHighlight: Boolean = false,
+    onMenuKey: ((Rect, FocusRequester) -> Unit)? = null,
+    onContextClick: ((Rect, FocusRequester) -> Unit)? = null,
+    onClick: (Rect) -> Unit,
+    onLongClick: ((Rect) -> Unit)? = null
 ) {
     val visualApp = rememberVisualApp(app)
+    if (visualApp.folder != null) DisposableEffect(visualApp.folder.id) {
+        onDispose(onFolderDetached)
+    }
     var isFocused by remember { mutableStateOf(false) }
     val labelAlpha by animateFloatAsState(
         targetValue = if (isFocused) 1f else 0f,
-        animationSpec = tween(220, easing = CubicBezierEasing(0.2f, 0.8f, 0.2f, 1f)),
+        animationSpec = focusMotion(),
         label = "grid-app-label"
     )
     Column(
@@ -726,13 +1732,25 @@ private fun GridAppItem(
             modifier = cardModifier.fillMaxWidth().height(132.dp * iconScale),
             radius = (22.dp * iconScale).coerceAtLeast(16.dp),
             showBorder = false,
-            uniformExpansionDp = 10.dp,
+            useAppCornerPreference = true,
+            uniformExpansionDp = if (editing) 18.dp else 10.dp,
             onHighlightChanged = { isFocused = it },
-            onClick = onClick
+            forceHighlight = forceHighlight,
+            onMenuKey = onMenuKey,
+            onContextClick = onContextClick,
+            onVisualBoundsChanged = if (visualApp.folder != null) onFolderVisualBounds else null,
+            onClick = {},
+            onClickWithBounds = onClick,
+            onLongClick = onLongClick
         ) {
-            if (visualApp.banner != null) {
+            if (visualApp.folder != null) {
+                FolderTile(visualApp.folder, folderApps, Modifier.fillMaxSize()
+                    .graphicsLayer { alpha = folderAlpha })
+            } else if (visualApp.banner != null) {
                 Box(Modifier.fillMaxSize().background(Color(visualApp.bannerBgColor)))
                 Image(visualApp.banner, visualApp.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            } else if (visualApp.customIcon != null) {
+                Image(visualApp.customIcon, visualApp.name, Modifier.align(Alignment.Center).size(80.96.dp * iconScale), contentScale = ContentScale.Fit)
             } else if (visualApp.icon != null) {
                 val color = Color(visualApp.icon.backgroundColor)
                 val gradient = remember(visualApp.icon.backgroundColor) { createBrandGradient(color) }
@@ -770,6 +1788,1141 @@ private fun GridAppItem(
     }
 }
 
+private fun appKey(app: DockApp) = "${app.packageName}/${app.activityName}"
+
+@Composable
+private fun FolderAppVisual(app: DockApp, modifier: Modifier = Modifier, radius: androidx.compose.ui.unit.Dp = 20.dp) {
+    val visual = rememberVisualApp(app)
+    BoxWithConstraints(modifier.clip(RoundedCornerShape(radius)), contentAlignment = Alignment.Center) {
+        val artworkSize = minOf(maxHeight * .61f, maxWidth * .46f)
+        when {
+            visual.customIcon != null -> Image(visual.customIcon, app.name, Modifier.size(artworkSize), contentScale = ContentScale.Fit)
+            visual.banner != null -> Image(visual.banner, app.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            visual.icon != null -> {
+                Box(Modifier.fillMaxSize().background(createBrandGradient(Color(visual.icon.backgroundColor))))
+                DockAppArtwork(visual.icon, app.name, Modifier.size(artworkSize))
+            }
+            else -> LineIcon("grid", Modifier.size(artworkSize), Color.White)
+        }
+    }
+}
+
+@Composable
+private fun FolderPanel(
+    modifier: Modifier,
+    corner: androidx.compose.ui.unit.Dp,
+    cornerY: androidx.compose.ui.unit.Dp? = null,
+    tint: Color,
+    insetX: androidx.compose.ui.unit.Dp,
+    insetY: androidx.compose.ui.unit.Dp,
+    gapX: androidx.compose.ui.unit.Dp,
+    gapY: androidx.compose.ui.unit.Dp,
+    footer: (@Composable () -> Unit)? = null,
+    cell: @Composable (Int, Modifier) -> Unit
+) {
+    Column(modifier.clip(ContinuousCornerShape(corner, cornerY)).background(tint).padding(horizontal = insetX, vertical = insetY)) {
+        FolderGridCells(gapX, gapY, Modifier.weight(1f).fillMaxWidth(), cell)
+        footer?.invoke()
+    }
+}
+
+@Composable
+private fun FolderGridCells(
+    horizontalGap: androidx.compose.ui.unit.Dp,
+    verticalGap: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier,
+    cell: @Composable (Int, Modifier) -> Unit
+) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(verticalGap)) {
+        repeat(3) { row ->
+            Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(horizontalGap)) {
+                repeat(3) { col -> cell(row * 3 + col, Modifier.weight(1f).fillMaxHeight()) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FolderTile(folder: HomeFolder, apps: List<DockApp>, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val members = remember(folder, apps) {
+        val byKey = apps.associateBy(::appKey)
+        folder.members.take(9).map { key ->
+            byKey[key]?.let { app -> app.copy(
+                name = AppHomeFeatures.customLabel(context, key) ?: app.name,
+                customIcon = AppHomeFeatures.customIcon(context, key)
+            ) }
+        }
+    }
+    FolderPanel(
+        modifier = modifier,
+        corner = 22.dp,
+        tint = Color(0xB8DCE4EA),
+        insetX = 24.dp,
+        insetY = 24.dp,
+        gapX = 7.dp,
+        gapY = 7.dp
+    ) { index, cellModifier ->
+        val app = members.getOrNull(index)
+        if (app != null) FolderAppVisual(app, cellModifier)
+        else Spacer(cellModifier)
+    }
+}
+
+@Composable
+private fun LineIcon(name: String, modifier: Modifier = Modifier.size(26.dp), tint: Color = Color.White) {
+    Canvas(modifier) {
+        val sx = size.width / 24f
+        val sy = size.height / 24f
+        fun line(x1: Float, y1: Float, x2: Float, y2: Float) = drawLine(tint, Offset(x1 * sx, y1 * sy), Offset(x2 * sx, y2 * sy), 2f * sx, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+        fun rect(l: Float, t: Float, r: Float, b: Float, radius: Float = 2f) = drawRoundRect(tint, Offset(l * sx, t * sy), androidx.compose.ui.geometry.Size((r-l)*sx, (b-t)*sy), androidx.compose.ui.geometry.CornerRadius(radius*sx), style = Stroke(1.8f*sx))
+        fun circle(x: Float, y: Float, radius: Float, stroke: Boolean = true) = drawCircle(tint, radius*sx, Offset(x*sx,y*sy), style = if (stroke) Stroke(1.8f*sx) else androidx.compose.ui.graphics.drawscope.Fill)
+        when (name) {
+            "info" -> { circle(12f, 12f, 9f); line(12f, 10f, 12f, 17f); circle(12f, 7f, 1f, false) }
+            "folder" -> { drawPath(Path().apply { moveTo(3*sx,7*sy); lineTo(3*sx,5*sy); quadraticTo(3*sx,4*sy,4*sx,4*sy); lineTo(9*sx,4*sy); lineTo(11*sx,6*sy); lineTo(20*sx,6*sy); quadraticTo(21*sx,6*sy,21*sx,7*sy); lineTo(21*sx,19*sy); quadraticTo(21*sx,20*sy,20*sx,20*sy); lineTo(4*sx,20*sy); quadraticTo(3*sx,20*sy,3*sx,19*sy); close() }, tint, style = Stroke(1.8f*sx)) }
+            "lock" -> { rect(5f,10f,19f,21f); drawArc(tint, 180f, 180f, false, Offset(7*sx,2*sx), androidx.compose.ui.geometry.Size(10*sx,14*sy), style=Stroke(1.8f*sx)); line(12f,14f,12f,17f) }
+            "unlock" -> { rect(5f,10f,19f,21f); drawArc(tint, 200f, 150f, false, Offset(8*sx,2*sx), androidx.compose.ui.geometry.Size(10*sx,14*sy), style=Stroke(1.8f*sx)); line(12f,14f,12f,17f) }
+            "trash" -> { line(4f,7f,20f,7f); rect(6f,8f,18f,21f); line(9f,4f,15f,4f); line(10f,11f,10f,18f); line(14f,11f,14f,18f) }
+            "widgets" -> { rect(3f,3f,10f,10f,1f); rect(14f,3f,21f,10f,1f); rect(3f,14f,10f,21f,1f); rect(14f,14f,21f,21f,1f) }
+            "share" -> { circle(18f,5f,2f,false); circle(6f,12f,2f,false); circle(18f,19f,2f,false); line(8f,11f,16f,6f); line(8f,13f,16f,18f) }
+            "hide" -> { drawPath(Path().apply { moveTo(2*sx,12*sy); quadraticTo(12*sx,1*sy,22*sx,12*sy); quadraticTo(12*sx,23*sy,2*sx,12*sy); close() }, tint, style=Stroke(1.8f*sx)); circle(12f,12f,3f); line(4f,20f,20f,4f) }
+            "plus" -> { line(12f,4f,12f,20f); line(4f,12f,20f,12f) }
+            "search" -> { circle(10f,10f,6f); line(14.5f,14.5f,21f,21f) }
+            "pin" -> { circle(12f,12f,8f); line(12f,8f,12f,13f); line(12f,16f,12f,16.1f) }
+            "edit" -> { line(4f,20f,8f,19f); line(4f,20f,5f,16f); line(5f,16f,16f,5f); line(14f,7f,17f,10f); line(18f,4f,20f,6f) }
+            "image" -> { rect(3f,4f,21f,20f,2f); circle(8f,9f,2f); line(5f,17f,10f,12f); line(10f,12f,14f,16f); line(14f,16f,17f,13f); line(17f,13f,20f,17f) }
+            "dock" -> { rect(3f,7f,21f,17f,3f); line(8f,10f,8f,14f); line(12f,10f,12f,14f); line(16f,10f,16f,14f) }
+            "grid" -> { (0..2).forEach { row -> (0..2).forEach { col -> rect(3f+col*6f,3f+row*6f,7f+col*6f,7f+row*6f,1f) } } }
+            else -> { circle(12f,12f,8f); line(8f,12f,16f,12f) }
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalHazeApi::class)
+private fun AppContextMenu(
+    app: DockApp,
+    anchor: Rect,
+    isInDock: Boolean,
+    suppressOpeningConfirmRelease: Boolean,
+    wallpaperHaze: HazeState,
+    staticBlur: ImageBitmap?,
+    onCloseStarted: () -> Unit,
+    onDismiss: () -> Unit,
+    onAppInfo: () -> Unit,
+    onCreateFolder: () -> Unit,
+    onToggleLock: () -> Unit,
+    onUninstall: () -> Unit,
+    onWidgets: () -> Unit,
+    onHide: () -> Unit,
+    onDesktopEdit: () -> Unit,
+    onDockAction: () -> Unit,
+    onIconEdit: () -> Unit,
+    onShortcut: (ShortcutInfo) -> Unit
+) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    var openingReleaseConsumed by remember { mutableStateOf(!suppressOpeningConfirmRelease) }
+    val firstMenuAction = remember { FocusRequester() }
+    // Give D-pad/keyboard focus to the menu immediately. The opening long-press release is
+    // consumed by the menu's key handler below, so it cannot activate this first item.
+    LaunchedEffect(Unit) {
+        withFrameNanos { }
+        withFrameNanos { }
+        firstMenuAction.requestFocus()
+    }
+    val shortcuts by produceState(emptyList<ShortcutInfo>(), app.packageName) {
+        value = if (Build.VERSION.SDK_INT >= 25) runCatching {
+            val launcher = context.getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
+            val query = LauncherApps.ShortcutQuery().setPackage(app.packageName)
+                .setQueryFlags(LauncherApps.ShortcutQuery.FLAG_MATCH_DYNAMIC or LauncherApps.ShortcutQuery.FLAG_MATCH_MANIFEST or LauncherApps.ShortcutQuery.FLAG_MATCH_PINNED)
+            launcher.getShortcuts(query, Process.myUserHandle()).orEmpty().distinctBy { it.id }
+        }.getOrDefault(emptyList()) else emptyList()
+    }
+    val providers = remember(app.packageName) {
+        AppWidgetManager.getInstance(context).installedProviders.filter { it.provider.packageName == app.packageName }
+    }
+    val isLocked = appKey(app) in AppHomeFeatures.locked(context)
+    var scaleTarget by remember { mutableFloatStateOf(0f) }
+    var closing by remember { mutableStateOf(false) }
+    val menuMotion: AnimationSpec<Float> = overlayMotion()
+    val scale by animateFloatAsState(scaleTarget, menuMotion, label = "app-menu-scale")
+    LaunchedEffect(Unit) {
+        // Measure first, then grow from the menu edge nearest the pressed icon.
+        withFrameNanos { }
+        scaleTarget = 1f
+    }
+    val requestDismiss = {
+        if (!closing) {
+            closing = true
+            scaleTarget = 0f
+            // 收缩动画开始时立刻把焦点还给原应用图标：菜单项销毁时焦点已就位，
+            // 否则焦点会 fallback 到桌面其他节点，看起来像整个页面跳了一下
+            onCloseStarted()
+        }
+    }
+    LaunchedEffect(closing) {
+        if (closing) {
+            delay(RenderPerformance.duration(OVERLAY_TRANSITION_MS).toLong())
+            onDismiss()
+        }
+    }
+    // One focus pill shared by every entry in the menu. Items only report their layout
+    // bounds; the pill below glides between them instead of each item fading in place.
+    var focusedItemKey by remember { mutableStateOf<String?>(null) }
+    var itemBounds by remember { mutableStateOf(emptyMap<String, Rect>()) }
+    var contentOrigin by remember { mutableStateOf(Offset.Zero) }
+    val targetRect = focusedItemKey
+        ?.let { key -> itemBounds[key]?.translate(-contentOrigin.x, -contentOrigin.y) }
+        ?.takeIf { it.width > 0f }
+    val previousTarget = remember { mutableStateOf<Rect?>(null) }
+    // First appearance snaps under the already-focused item; later moves glide in 500ms.
+    val slideSpec: AnimationSpec<Rect> = if (previousTarget.value == null) snap()
+    else tween(RenderPerformance.duration(SELECTION_TRANSITION_MS), easing = CubicBezierEasing(.2f, .8f, .2f, 1f))
+    val highlightRect by animateValueAsState(
+        targetValue = targetRect ?: Rect.Zero,
+        typeConverter = Rect.VectorConverter,
+        animationSpec = slideSpec,
+        label = "menu-focus-slide",
+    )
+    SideEffect { previousTarget.value = targetRect }
+    val onMenuFocus = { key: String -> focusedItemKey = key }
+    val registerBounds = { key: String, rect: Rect -> itemBounds = itemBounds + (key to rect) }
+    BackHandler(onBack = requestDismiss)
+    BoxWithConstraints(Modifier.fillMaxSize().zIndex(1000f)) {
+        var measuredMenuSize by remember { mutableStateOf(IntSize.Zero) }
+        val margin = with(density) { 12.dp.roundToPx() }
+        val gap = with(density) { 12.dp.roundToPx() }
+        val maxWidthPx = constraints.maxWidth
+        val maxHeightPx = constraints.maxHeight
+        val preferredWidth = with(density) { 296.dp.roundToPx() }
+        val rightSpace = (maxWidthPx - margin - anchor.right.roundToInt() - gap).coerceAtLeast(0)
+        val leftSpace = (anchor.left.roundToInt() - gap - margin).coerceAtLeast(0)
+        val placeRight = rightSpace >= preferredWidth || rightSpace >= leftSpace
+        val widthPx = minOf(preferredWidth, if (placeRight) rightSpace else leftSpace).coerceAtLeast(1)
+        val menuWidth = with(density) { widthPx.toDp() }
+        val maxMenuHeight = with(density) { (maxHeightPx - margin * 2).coerceAtLeast(1).toDp() }
+        val menuHeightPx = (measuredMenuSize.height.takeIf { it > 0 } ?: with(density) { 500.dp.roundToPx() })
+            .coerceAtMost((maxHeightPx - margin * 2).coerceAtLeast(1))
+        val x = if (placeRight) anchor.right.roundToInt() + gap else anchor.left.roundToInt() - gap - widthPx
+        val y = (anchor.center.y.roundToInt() - menuHeightPx / 2)
+            .coerceIn(margin, (maxHeightPx - menuHeightPx - margin).coerceAtLeast(margin))
+        // An edge pivot keeps every animation frame on the chosen side of the icon.
+        val iconPivotX = if (placeRight) 0f else 1f
+        val iconPivotY = ((anchor.center.y - y) / menuHeightPx.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
+        Box(Modifier.fillMaxSize().focusProperties { canFocus = false }
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = requestDismiss))
+        Column(
+            Modifier.offset { IntOffset(x, y) }.width(menuWidth).heightIn(max = minOf(620.dp, maxMenuHeight))
+                .onSizeChanged { measuredMenuSize = it }
+                // A focusGroup improves traversal order but does not trap focus by itself.
+                // Keep directional navigation inside the modal menu until it is dismissed;
+                // once closing starts, release the guard so the focus handoff back to the
+                // launching icon succeeds right away instead of waiting for removal.
+                .focusProperties { onExit = { if (!closing) cancelFocusChange() } }
+                .focusGroup()
+                .onPreviewKeyEvent { event ->
+                    val keyCode = event.nativeKeyEvent.keyCode
+                    val isConfirmRelease = event.type == KeyEventType.KeyUp &&
+                        (keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER || keyCode == android.view.KeyEvent.KEYCODE_ENTER ||
+                            keyCode == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER || keyCode == android.view.KeyEvent.KEYCODE_SPACE)
+                    val isConfirm = keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
+                        keyCode == android.view.KeyEvent.KEYCODE_ENTER ||
+                        keyCode == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER ||
+                        keyCode == android.view.KeyEvent.KEYCODE_SPACE
+                    if (!openingReleaseConsumed && isConfirm) {
+                        // The long-press key is still physically held when this menu gains
+                        // focus. Swallow its repeats and its first release so the focused
+                        // item cannot be activated by the gesture that merely opened us.
+                        if (isConfirmRelease) openingReleaseConsumed = true
+                        true
+                    } else false
+                }
+                .graphicsLayer {
+                scaleX = scale.coerceIn(0f, 1f); scaleY = scale.coerceIn(0f, 1f)
+                transformOrigin = TransformOrigin(iconPivotX, iconPivotY)
+            }
+                .clip(RoundedCornerShape(32.dp))
+                .then(if (RenderPerformance.blur31) Modifier.hazeEffect(wallpaperHaze) {
+                    blurRadius = 40.dp
+                    noiseFactor = 0f
+                    backgroundColor = Color(0xFF141414)
+                    tints = listOf(HazeTint(Color(0xCC141414)))
+                    inputScale = HazeInputScale.Fixed(.3f)
+                } else Modifier.background(Color(0xCC141414)))
+                // Tint belongs above the sampled image, so bright app artwork cannot
+                // overwrite the surface and produce a saturated halo behind the text.
+                // Compact, equal inset on all four sides.
+                .padding(12.dp)
+                .verticalScroll(rememberScrollState())
+                .onGloballyPositioned { contentOrigin = it.positionInRoot() }
+                .drawBehind {
+                    // The sliding focus pill, drawn under the items in scroll-content
+                    // coordinates so it moves with the list while it glides between entries.
+                    if (targetRect != null) drawRoundRect(
+                        brush = Brush.linearGradient(
+                            listOf(Color.White.copy(alpha = .92f), Color(0xFFD0D0D0).copy(alpha = .92f)),
+                            start = Offset(highlightRect.left, highlightRect.top),
+                            end = Offset(highlightRect.right, highlightRect.bottom),
+                        ),
+                        topLeft = Offset(highlightRect.left, highlightRect.top),
+                        size = highlightRect.size,
+                        cornerRadius = CornerRadius(19.dp.toPx()),
+                    )
+                },
+            // Keep the three shortcut controls at their existing size; tighten only the
+            // action list below so the popup stays compact on TV-sized layouts.
+            verticalArrangement = Arrangement.spacedBy(1.dp)
+        ) {
+                Row(Modifier.fillMaxWidth().height(60.dp), verticalAlignment = Alignment.CenterVertically) {
+                    MenuTopButton("应用信息", "info", onAppInfo, Modifier.weight(1f), firstMenuAction, "top-info", onMenuFocus, registerBounds)
+                    MenuTopButton("创建文件夹", "folder", onCreateFolder, Modifier.weight(1f), menuKey = "top-folder", onMenuFocus = onMenuFocus, registerBounds = registerBounds)
+                    MenuTopButton(if (isLocked) "取消访问锁" else "访问锁", if (isLocked) "unlock" else "lock", onToggleLock, Modifier.weight(1f), menuKey = "top-lock", onMenuFocus = onMenuFocus, registerBounds = registerBounds)
+                }
+                Box(Modifier.fillMaxWidth().padding(vertical = 6.dp).height(1.dp).background(Color.White.copy(alpha = .20f)))
+                shortcuts.take(4).forEach { shortcut ->
+                    val drawable = remember(shortcut.id) {
+                        runCatching { (context.getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps).getShortcutIconDrawable(shortcut, context.resources.displayMetrics.densityDpi) }.getOrNull()
+                    }
+                    MenuRow(shortcut.shortLabel?.toString()?.ifBlank { null } ?: shortcut.longLabel?.toString()?.ifBlank { null } ?: shortcut.id,
+                        onClick = { onShortcut(shortcut) }, iconContent = { if (drawable != null) DrawableIcon(drawable) else LineIcon("grid") },
+                        menuKey = "shortcut-${shortcut.id}", onMenuFocus = onMenuFocus, registerBounds = registerBounds)
+                }
+                MenuRow("卸载应用", onUninstall, "trash", menuKey = "uninstall", onMenuFocus = onMenuFocus, registerBounds = registerBounds)
+                if (providers.isNotEmpty()) MenuRow("小组件", onWidgets, "widgets", menuKey = "widgets-row", onMenuFocus = onMenuFocus, registerBounds = registerBounds)
+                MenuRow("桌面编辑", onDesktopEdit, "edit", menuKey = "desktop-edit", onMenuFocus = onMenuFocus, registerBounds = registerBounds)
+                MenuRow(if (isInDock) "移出 Dock" else "添加到 Dock", onDockAction, "dock", menuKey = "dock-toggle", onMenuFocus = onMenuFocus, registerBounds = registerBounds)
+                MenuRow("图标编辑", onIconEdit, "image", menuKey = "icon-edit", onMenuFocus = onMenuFocus, registerBounds = registerBounds)
+                MenuRow("隐藏应用", onHide, "hide", menuKey = "hide", onMenuFocus = onMenuFocus, registerBounds = registerBounds)
+        }
+    }
+}
+
+/** Cheap 8x8 luminance sample; recomputed only when the cached wallpaper bitmap changes. */
+private fun sampledBitmapLuminance(bitmap: Bitmap): Float {
+    if (bitmap.width <= 0 || bitmap.height <= 0) return .5f
+    var total = 0.0
+    var count = 0
+    for (row in 0 until 8) {
+        val y = ((row + .5f) * bitmap.height / 8f).toInt().coerceIn(0, bitmap.height - 1)
+        for (column in 0 until 8) {
+            val x = ((column + .5f) * bitmap.width / 8f).toInt().coerceIn(0, bitmap.width - 1)
+            val color = bitmap.getPixel(x, y)
+            fun linear(channel: Int): Double {
+                val value = channel / 255.0
+                return if (value <= .04045) value / 12.92 else Math.pow((value + .055) / 1.055, 2.4)
+            }
+            total += .2126 * linear(android.graphics.Color.red(color)) +
+                .7152 * linear(android.graphics.Color.green(color)) +
+                .0722 * linear(android.graphics.Color.blue(color))
+            count++
+        }
+    }
+    return (total / count.coerceAtLeast(1)).toFloat().coerceIn(0f, 1f)
+}
+
+@Composable
+private fun MenuTopButton(label: String, icon: String, onClick: () -> Unit, modifier: Modifier = Modifier, focusRequester: FocusRequester? = null, menuKey: String, onMenuFocus: (String) -> Unit, registerBounds: (String, Rect) -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val shape = RoundedCornerShape(17.dp)
+    // The focus background itself is the shared sliding pill drawn by the menu container;
+    // items only animate their content color as the pill arrives and leaves.
+    val focusReveal by animateFloatAsState(if (focused || hovered) 1f else 0f,
+        focusMotion(),
+        label = "menu-top-focus-$label")
+    val foreground = lerp(Color.White, Color(0xFF17191D), focusReveal)
+    Column(modifier.padding(2.dp).fillMaxHeight().clip(shape)
+        .onGloballyPositioned { coords -> registerBounds(menuKey, coords.boundsInRoot()) }
+        .semantics { contentDescription = label }
+        .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
+        .onFocusChanged {
+            focused = it.isFocused
+            if (it.isFocused) onMenuFocus(menuKey)
+        }
+        .hoverable(interaction)
+        .focusable()
+        .activateMenuItem(onClick)
+        .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+        .padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+        LineIcon(icon, Modifier.size(27.dp), foreground)
+    }
+}
+
+@Composable
+private fun MenuRow(label: String, onClick: () -> Unit, icon: String? = null, iconContent: (@Composable () -> Unit)? = null, menuKey: String? = null, onMenuFocus: ((String) -> Unit)? = null, registerBounds: ((String, Rect) -> Unit)? = null, focusRequester: FocusRequester? = null) {
+    var focused by remember { mutableStateOf(false) }
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val shape = RoundedCornerShape(19.dp)
+    val sliding = menuKey != null
+    // Sliding mode: the shared pill carries the highlight, items only flip content color.
+    // Legacy mode (widget dialogs): keep the original in-place fade + scale.
+    val focusSpec: AnimationSpec<Float> = focusMotion()
+    val focusReveal by animateFloatAsState(if (focused || hovered) 1f else 0f, focusSpec, label = "menu-row-focus-$label")
+    val foreground = lerp(Color.White, Color(0xFF17191D), focusReveal)
+    Row(Modifier.fillMaxWidth().padding(2.dp).heightIn(min = 50.dp)
+        .clip(shape)
+        .then(if (sliding) Modifier.onGloballyPositioned { coords -> registerBounds?.invoke(menuKey!!, coords.boundsInRoot()) } else Modifier)
+        .then(if (sliding) Modifier else Modifier.background(Brush.linearGradient(listOf(
+            Color.White.copy(alpha = .92f * focusReveal),
+            Color(0xFFD0D0D0).copy(alpha = .92f * focusReveal)
+        ))))
+        .then(if (sliding) Modifier else Modifier.graphicsLayer {
+            scaleX = .96f + .04f * focusReveal
+            scaleY = .96f + .04f * focusReveal
+        })
+        .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
+        .onFocusChanged {
+            focused = it.isFocused
+            if (it.isFocused) menuKey?.let { key -> onMenuFocus?.invoke(key) }
+        }.hoverable(interaction).focusable().activateMenuItem(onClick)
+        .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+        .padding(horizontal = 16.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = foreground, fontSize = 21.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (iconContent != null) iconContent() else LineIcon(icon ?: "grid", Modifier.size(25.dp), foreground)
+    }
+}
+
+@Composable
+private fun FolderContextMenu(
+    folder: HomeFolder,
+    anchor: Rect,
+    onDismiss: () -> Unit,
+    onAddApps: () -> Unit,
+    onDissolve: () -> Unit
+) {
+    val density = LocalDensity.current
+    val firstAction = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        withFrameNanos { }
+        firstAction.requestFocus()
+    }
+    BackHandler(onBack = onDismiss)
+    BoxWithConstraints(Modifier.fillMaxSize().zIndex(1001f)) {
+        val width = 292.dp.coerceAtMost(maxWidth - 24.dp)
+        val height = 190.dp.coerceAtMost(maxHeight - 24.dp)
+        val margin = 12.dp
+        val gap = 10.dp
+        val anchorLeft = with(density) { anchor.left.toDp() }
+        val anchorRight = with(density) { anchor.right.toDp() }
+        val anchorTop = with(density) { anchor.top.toDp() }
+        val anchorBottom = with(density) { anchor.bottom.toDp() }
+        val x = ((anchorLeft + anchorRight - width) / 2).coerceIn(margin, (maxWidth - width - margin).coerceAtLeast(margin))
+        val y = when {
+            anchorBottom + gap + height <= maxHeight - margin -> anchorBottom + gap
+            anchorTop - gap - height >= margin -> anchorTop - gap - height
+            else -> (anchorTop + anchorBottom - height) / 2
+        }.coerceIn(margin, (maxHeight - height - margin).coerceAtLeast(margin))
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .28f))
+            .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }, onClick = onDismiss))
+        Column(
+            Modifier.offset(x, y).width(width).heightIn(max = height)
+                .clip(RoundedCornerShape(28.dp))
+                .background(Color(0xEE202329))
+                .border(1.dp, Color.White.copy(alpha = .26f), RoundedCornerShape(28.dp))
+                .padding(10.dp)
+                .focusGroup(),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Text(folder.name, color = Color.White.copy(alpha = .68f), fontSize = 16.sp,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 7.dp),
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            MenuRow("添加应用", onAddApps, "plus", focusRequester = firstAction)
+            MenuRow("解散文件夹", onDissolve, "folder")
+        }
+    }
+}
+
+private fun Modifier.activateMenuItem(onClick: () -> Unit) = onPreviewKeyEvent { event ->
+    val code = event.nativeKeyEvent.keyCode
+    val confirm = code == android.view.KeyEvent.KEYCODE_DPAD_CENTER || code == android.view.KeyEvent.KEYCODE_ENTER ||
+        code == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER || code == android.view.KeyEvent.KEYCODE_SPACE
+    if (event.type == KeyEventType.KeyUp && confirm) {
+        onClick()
+        true
+    } else false
+}
+
+private val DialogPanel = Color(0xF51B2028)
+private val DialogCard = Color(0xFF292F39)
+private val DialogAccent = Color(0xFF8ED7FF)
+
+@Composable
+private fun HomeDialogSurface(
+    title: String,
+    subtitle: String,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier.widthIn(min = 420.dp, max = 600.dp),
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        val dialogView = LocalView.current
+        DisposableEffect(dialogView) {
+            val window = (dialogView.parent as? DialogWindowProvider)?.window
+            window?.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            window?.attributes = window?.attributes?.also { it.dimAmount = .38f }
+            if (Build.VERSION.SDK_INT >= 31) {
+                window?.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+                window?.setBackgroundBlurRadius(42)
+                window?.attributes = window?.attributes?.also { it.blurBehindRadius = 42 }
+            }
+            onDispose {
+                if (Build.VERSION.SDK_INT >= 31) window?.setBackgroundBlurRadius(0)
+            }
+        }
+        Column(
+            modifier.clip(RoundedCornerShape(24.dp))
+                .background(DialogPanel)
+                .border(1.dp, Color.White.copy(alpha = .16f), RoundedCornerShape(24.dp))
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(13.dp)
+        ) {
+            if (subtitle.isNotBlank()) Text(subtitle, color = Color.White.copy(alpha = .68f), fontSize = 14.sp)
+            content()
+        }
+    }
+}
+
+@Composable
+private fun HomeDialogAction(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    icon: String? = null,
+    primary: Boolean = false,
+    enabled: Boolean = true,
+    compact: Boolean = false
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    var focused by remember { mutableStateOf(false) }
+    val active = enabled && (hovered || focused)
+    val reveal by animateFloatAsState(if (active) 1f else 0f, focusMotion(), label = "dialog-$label")
+    val bg = if (primary) lerp(Color(0xFF2A6687), DialogAccent, reveal) else lerp(DialogCard, Color.White, reveal)
+    val fg = if (reveal > .52f) Color(0xFF10151B) else Color.White.copy(alpha = if (enabled) 1f else .38f)
+    Row(
+        modifier.height(if (compact) 38.dp else 46.dp)
+            .clip(RoundedCornerShape(if (compact) 13.dp else 15.dp))
+            .background(bg.copy(alpha = if (enabled) 1f else .45f))
+            .border(1.dp, Color.White.copy(alpha = .12f + reveal * .30f), RoundedCornerShape(if (compact) 13.dp else 15.dp))
+            .hoverable(interaction, enabled)
+            .onFocusChanged { focused = it.isFocused }
+            .focusable(enabled)
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick)
+            .padding(horizontal = if (compact) 12.dp else 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        if (icon != null) LineIcon(icon, Modifier.size(if (compact) 18.dp else 20.dp), fg)
+        Text(label, color = fg, fontSize = if (compact) 14.sp else 16.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun IconEditorDialog(
+    app: DockApp,
+    currentName: String,
+    currentIcon: ImageBitmap?,
+    onDismiss: () -> Unit,
+    onChooseImage: () -> Unit,
+    onSaveName: (String) -> Unit,
+    onReset: () -> Unit
+) {
+    var name by remember(app.packageName, app.activityName) { mutableStateOf(currentName) }
+    HomeDialogSurface("图标与名称", "自定义桌面显示效果", onDismiss, Modifier.width(560.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                Box(Modifier.size(84.dp).clip(RoundedCornerShape(20.dp)).background(DialogCard)
+                    .border(1.dp, Color.White.copy(alpha = .14f), RoundedCornerShape(20.dp)), contentAlignment = Alignment.Center) {
+                    when {
+                        currentIcon != null -> Image(currentIcon, app.name, Modifier.fillMaxSize().padding(10.dp), contentScale = ContentScale.Fit)
+                        app.icon != null -> DockAppArtwork(app.icon, app.name, Modifier.size(60.dp))
+                        else -> LineIcon("image", Modifier.size(36.dp))
+                    }
+                }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(app.name, color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    HomeDialogAction("从相册选择图标", onClick = onChooseImage, icon = "image")
+                }
+            }
+            OutlinedTextField(value = name, onValueChange = { name = it.take(40) }, label = { Text("桌面显示名称") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                HomeDialogAction("恢复默认", onClick = onReset)
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    HomeDialogAction("取消", onClick = onDismiss)
+                    HomeDialogAction("保存", enabled = name.isNotBlank(), primary = true, onClick = { if (name.isNotBlank()) onSaveName(name.trim()) })
+                }
+            }
+    }
+}
+
+@Composable
+private fun DrawableIcon(drawable: Drawable, modifier: Modifier = Modifier.size(27.dp)) {
+    val bitmap = remember(drawable) {
+        runCatching {
+            Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888).also { b ->
+                val canvas = android.graphics.Canvas(b)
+                drawable.setBounds(0, 0, 96, 96); drawable.draw(canvas)
+            }.asImageBitmap()
+        }.getOrNull()
+    }
+    if (bitmap != null) Image(bitmap, null, modifier) else LineIcon("grid", modifier)
+}
+
+@Composable
+private fun FolderCreateAnimation(request: FolderCreateRequest, onFinished: () -> Unit, onDismiss: () -> Unit) {
+    val shrink = remember(request) { Animatable(0f) }
+    val folderAlpha = remember(request) { Animatable(0f) }
+    LaunchedEffect(request) {
+        coroutineScope {
+            launch { folderAlpha.animateTo(1f, tween(RenderPerformance.duration(270))) }
+            shrink.animateTo(1f, if (RenderPerformance.reducedEffects) pageMotion() else spring(dampingRatio = .62f, stiffness = Spring.StiffnessMediumLow))
+        }
+        onFinished()
+    }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        val density = LocalDensity.current
+        val bounds = request.bounds
+        val widthPx = bounds.width.coerceAtLeast(with(density) { 150.dp.toPx() })
+        val heightPx = bounds.height.coerceAtLeast(with(density) { 100.dp.toPx() })
+        val width = with(density) { widthPx.toDp() }
+        val height = with(density) { heightPx.toDp() }
+        val inset = with(density) { 14.dp.toPx() }
+        val gap = with(density) { 7.dp.toPx() }
+        val targetWidth = (widthPx - inset * 2 - gap * 2) / 3f
+        val targetHeight = (heightPx - inset * 2 - gap * 2) / 3f
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .24f * folderAlpha.value))) {
+            Box(Modifier.offset { IntOffset(bounds.left.roundToInt(), bounds.top.roundToInt()) }.size(width, height)) {
+                // Cover the original home card while its moving copy contracts into cell one.
+                Box(Modifier.fillMaxSize().background(Color(0xFF242A31), RoundedCornerShape(22.dp)))
+                FolderTile(HomeFolder("preview", "", emptyList()), emptyList(),
+                    Modifier.fillMaxSize().graphicsLayer { alpha = folderAlpha.value })
+                FolderAppVisual(request.app, Modifier.fillMaxSize().graphicsLayer {
+                    transformOrigin = TransformOrigin(0f, 0f)
+                    translationX = inset * shrink.value
+                    translationY = inset * shrink.value
+                    scaleX = 1f + (targetWidth / widthPx - 1f) * shrink.value
+                    scaleY = 1f + (targetHeight / heightPx - 1f) * shrink.value
+                })
+            }
+        }
+    }
+}
+
+@Composable
+private fun PinEntryDialog(mode: String, onDismiss: () -> Unit, onSubmit: (String) -> Unit) {
+    val context = LocalContext.current
+    var value by remember(mode) { mutableStateOf("") }
+    var submitted by remember(mode) { mutableStateOf(false) }
+    val focus = remember { FocusRequester() }
+    val sequenceScroll = rememberScrollState()
+    val isSetup = mode.startsWith("setup")
+    val expectedLength = if (isSetup) 0 else AppHomeFeatures.pinLength(context)
+    fun append(direction: String) {
+        if (isSetup || expectedLength <= 0 || value.length < expectedLength) value += direction
+    }
+    fun submit() { if (value.length >= 4) onSubmit(value) }
+    val title = when {
+        mode.contains("mismatch") -> "两次方向密码不一致"
+        mode.startsWith("setup") && mode.contains("confirm") -> "再次输入方向密码"
+        mode.startsWith("setup") -> "设置方向密码"
+        mode.startsWith("verify_unlock") -> if (mode.contains("error")) "方向密码不正确，请重试" else "输入方向密码解除访问锁"
+        mode.contains("error") -> "方向密码不正确，请重试"
+        else -> "输入方向密码后继续"
+    }
+    BackHandler {
+        if (value.isNotEmpty()) value = value.dropLast(1) else onDismiss()
+    }
+    LaunchedEffect(Unit) { withFrameNanos { }; focus.requestFocus() }
+    LaunchedEffect(value.length) { sequenceScroll.animateScrollTo(sequenceScroll.maxValue) }
+    LaunchedEffect(value, expectedLength, isSetup) {
+        if (!isSetup && !submitted && expectedLength >= 4 && value.length == expectedLength) {
+            submitted = true
+            onSubmit(value)
+        }
+    }
+    HomeDialogSurface(
+        title = title,
+        subtitle = if (isSetup) "依次按方向键，至少 4 步；按 OK 进入下一步" else "依次输入方向密码，正确后自动解锁",
+        onDismiss = onDismiss,
+        modifier = Modifier.width(470.dp).focusRequester(focus).focusable().onPreviewKeyEvent { event ->
+            if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+            val native = event.nativeKeyEvent
+            if (native.repeatCount > 0) return@onPreviewKeyEvent true
+            when (event.key) {
+                Key.DirectionUp -> { append("U"); true }
+                Key.DirectionDown -> { append("D"); true }
+                Key.DirectionLeft -> { append("L"); true }
+                Key.DirectionRight -> { append("R"); true }
+                else -> when (native.keyCode) {
+                    android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+                    android.view.KeyEvent.KEYCODE_ENTER,
+                    android.view.KeyEvent.KEYCODE_NUMPAD_ENTER,
+                    android.view.KeyEvent.KEYCODE_SPACE -> { if (isSetup) submit(); true }
+                    else -> false
+                }
+            }
+        }
+    ) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 58.dp).horizontalScroll(sequenceScroll), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+            if (value.isEmpty()) Text("等待输入…", color = Color.White.copy(alpha = .38f), fontSize = 17.sp)
+            value.forEach { _ ->
+                Box(Modifier.padding(horizontal = 4.dp).size(46.dp).clip(RoundedCornerShape(14.dp))
+                    .background(DialogAccent.copy(alpha = .15f)).border(1.dp, DialogAccent.copy(alpha = .65f), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
+                    Text("●", color = DialogAccent, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+        Text("已输入 ${value.length} 步", color = Color.White.copy(alpha = .58f), fontSize = 14.sp, modifier = Modifier.align(Alignment.CenterHorizontally))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End)) {
+            HomeDialogAction("清空", onClick = { value = "" }, enabled = value.isNotEmpty())
+            HomeDialogAction("删除一步", onClick = { value = value.dropLast(1) }, enabled = value.isNotEmpty())
+            if (isSetup) HomeDialogAction(if (mode.contains("confirm")) "保存密码" else "下一步",
+                onClick = ::submit, primary = true, enabled = value.length >= 4)
+        }
+    }
+}
+
+private fun folderMorphMotion() = tween<Float>(RenderPerformance.duration(500), easing = CubicBezierEasing(.4f, 0f, .2f, 1f))
+
+/** The same panel stays mounted at its home position and moves when opened. */
+@Composable
+private fun FolderMorphHost(
+    entries: List<DockApp>,
+    anchors: Map<String, FolderVisualAnchor>,
+    activeRequest: OpenFolderRequest?,
+    menuHaze: HazeState,
+    apps: List<DockApp>,
+    wallpaperImage: ImageBitmap?,
+    excludedKeys: Set<String>,
+    onReady: () -> Unit,
+    onProgress: (Float) -> Unit,
+    onFolderClick: (DockApp) -> Unit,
+    onMenu: (DockApp, Rect, FocusRequester) -> Unit,
+    onClosing: (OpenFolderRequest) -> Unit,
+    onDismiss: (OpenFolderRequest) -> Unit,
+    onAdd: (OpenFolderRequest) -> Unit,
+    onPick: (DockApp) -> Unit,
+    onLaunch: (DockApp) -> Unit
+) {
+    val view = LocalView.current
+    val firstDraw = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    var closeActive: (() -> Unit)? = null
+    Box(Modifier.fillMaxSize()
+        .then(if (activeRequest != null && RenderPerformance.blur31) Modifier.hazeSource(menuHaze, zIndex = 2f) else Modifier)
+        .drawWithContent {
+        drawContent()
+        if (firstDraw.compareAndSet(false, true)) view.post { onReady() }
+    }) {
+        entries.forEach { entry ->
+            val folder = entry.folder ?: return@forEach
+            val anchor = anchors[folder.id] ?: return@forEach
+            key(folder.id) {
+                val selectedRequest = activeRequest?.takeIf { it.folder.id == folder.id }
+                // Closed folders stay inside the dock/grid's normal layout and scroll clip,
+                // just like app icons. Only detach the active folder while it morphs open.
+                if (selectedRequest != null) {
+                    FolderMorphPanel(
+                        entry = entry,
+                        anchor = anchor,
+                        request = selectedRequest,
+                        coveredByOpenFolder = false,
+                        apps = apps,
+                        wallpaperImage = wallpaperImage,
+                        excludedKeys = excludedKeys,
+                        onProgress = onProgress,
+                        onFolderClick = onFolderClick,
+                        onMenu = onMenu,
+                        onClosing = onClosing,
+                        onDismiss = onDismiss,
+                        onAdd = onAdd,
+                        onPick = onPick,
+                        onLaunch = onLaunch,
+                        registerClose = { closeActive = it }
+                    )
+                }
+            }
+        }
+        BackHandler(enabled = activeRequest != null) { closeActive?.invoke() }
+    }
+}
+
+@Composable
+private fun FolderMorphPanel(
+    entry: DockApp,
+    anchor: FolderVisualAnchor,
+    request: OpenFolderRequest?,
+    coveredByOpenFolder: Boolean,
+    apps: List<DockApp>,
+    wallpaperImage: ImageBitmap?,
+    excludedKeys: Set<String>,
+    onProgress: (Float) -> Unit,
+    onFolderClick: (DockApp) -> Unit,
+    onMenu: (DockApp, Rect, FocusRequester) -> Unit,
+    onClosing: (OpenFolderRequest) -> Unit,
+    onDismiss: (OpenFolderRequest) -> Unit,
+    onAdd: (OpenFolderRequest) -> Unit,
+    onPick: (DockApp) -> Unit,
+    onLaunch: (DockApp) -> Unit,
+    registerClose: (() -> Unit) -> Unit
+) {
+    val folder = entry.folder ?: return
+    val context = LocalContext.current
+    val members = remember(folder, apps, excludedKeys) {
+        val byKey = apps.associateBy(::appKey)
+        folder.members.filterNot(excludedKeys::contains).mapNotNull { key ->
+            byKey[key]?.let { app -> app.copy(
+                name = AppHomeFeatures.customLabel(context, key) ?: app.name,
+                customIcon = AppHomeFeatures.customIcon(context, key)
+            ) }
+        }
+    }
+    val picking = request?.picking == true
+    val entryCount = members.size + if (picking) 0 else 1
+    val pageCount = ((entryCount + 8) / 9).coerceAtLeast(1)
+    var page by remember(folder.id) { mutableIntStateOf(0) }
+    var focusAfterPage by remember(folder.id) { mutableStateOf<Int?>(null) }
+    val cellFocus = remember(folder.id) { List(9) { FocusRequester() } }
+    val transition = remember(folder.id) { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    var closing by remember(folder.id) { mutableStateOf(false) }
+    val launchBehavior = remember(DesktopPreferences.version) {
+        DesktopPreferences.FolderLaunchBehavior.current(context)
+    }
+    val indicatorStyle = remember(DesktopPreferences.version) { DesktopPreferences.FolderPageIndicator.current(context) }
+    val panelTint = remember(wallpaperImage) {
+        val imageIsLight = wallpaperImage?.asAndroidBitmap()?.let(::sampledBitmapLuminance)?.let { it > .42f }
+        val systemIsLight = if (Build.VERSION.SDK_INT >= 27) runCatching {
+            val color = android.app.WallpaperManager.getInstance(context)
+                .getWallpaperColors(android.app.WallpaperManager.FLAG_SYSTEM)?.primaryColor?.toArgb()
+            color != null && androidx.core.graphics.ColorUtils.calculateLuminance(color) > .5
+        }.getOrDefault(false) else false
+        if (imageIsLight ?: systemIsLight) Color.Black.copy(alpha = .5f) else Color.White.copy(alpha = .5f)
+    }
+    fun close(after: (OpenFolderRequest) -> Unit = onDismiss) {
+        val current = request ?: return
+        if (closing) return
+        closing = true
+        onClosing(current)
+        page = 0
+        scope.launch {
+            withFrameNanos { }
+            transition.animateTo(0f, folderMorphMotion())
+            after(current)
+        }
+    }
+    if (request != null) registerClose { close() }
+    LaunchedEffect(request?.folder?.id) {
+        if (request != null) {
+            closing = false
+            if (entryCount > 0) {
+                withFrameNanos { }
+                runCatching { cellFocus[0].requestFocus() }
+            }
+            transition.animateTo(1f, folderMorphMotion())
+        } else {
+            page = 0
+        }
+    }
+    page = page.coerceIn(0, pageCount - 1)
+    LaunchedEffect(page, focusAfterPage) {
+        val index = focusAfterPage ?: return@LaunchedEffect
+        withFrameNanos { }
+        if (page * 9 + index < entryCount) runCatching { cellFocus[index].requestFocus() }
+        focusAfterPage = null
+    }
+    fun changePage(next: Int, targetCell: Int = 0) {
+        if (next in 0 until pageCount && next != page) {
+            page = next
+            focusAfterPage = targetCell.coerceIn(0, (entryCount - next * 9 - 1).coerceAtMost(8))
+        }
+    }
+    BoxWithConstraints(Modifier.fillMaxSize()
+        .zIndex(if (request != null) 100f else 0f)
+        .graphicsLayer { alpha = if (coveredByOpenFolder) 0f else 1f }
+        .focusProperties { onExit = { if (request != null && !closing) cancelFocusChange() } }
+        .focusGroup()) {
+        val density = LocalDensity.current
+        // Both directions use the selected visual bounds. The base layout bounds are smaller
+        // than the focused tile and caused a visible size jump at either end of the morph.
+        val source = if (closing) anchor.visual else request?.bounds ?: anchor.visual
+        val startLeft = with(density) { source.left.toDp() }
+        val startTop = with(density) { source.top.toDp() }
+        val startWidth = with(density) { source.width.toDp() }.coerceAtLeast(1.dp)
+        val startHeight = with(density) { source.height.toDp() }.coerceAtLeast(1.dp)
+        val baseWidth = with(density) { anchor.base.width.toDp() }.coerceAtLeast(1.dp)
+        val baseHeight = with(density) { anchor.base.height.toDp() }.coerceAtLeast(1.dp)
+        val focusScaleX = startWidth / baseWidth
+        val focusScaleY = startHeight / baseHeight
+        val aspect = (baseWidth / baseHeight).coerceIn(1.2f, 2.4f)
+        val targetWidth = minOf(maxWidth * .68f, maxHeight * .76f * aspect, 780.dp) * 1.08f
+        val targetHeight = targetWidth / aspect
+        val targetLeft = (maxWidth - targetWidth) / 2
+        val targetTop = (maxHeight - targetHeight) / 2
+        val p = transition.value
+        SideEffect { if (request != null) onProgress(p) }
+        val currentWidth = startWidth + (targetWidth - startWidth) * p
+        val currentHeight = startHeight + (targetHeight - startHeight) * p
+        val cornerX = 22.dp * focusScaleX + (30.dp - 22.dp * focusScaleX) * p
+        val cornerY = 22.dp * focusScaleY + (30.dp - 22.dp * focusScaleY) * p
+        val insetX = 24.dp * focusScaleX + (36.dp - 24.dp * focusScaleX) * p
+        val insetY = 24.dp * focusScaleY + (36.dp - 24.dp * focusScaleY) * p
+        val gapX = 7.dp * focusScaleX + (20.dp - 7.dp * focusScaleX) * p
+        val gapY = 7.dp * focusScaleY + (20.dp - 7.dp * focusScaleY) * p
+        val cellCorner = 20.dp * ((focusScaleX + focusScaleY) / 2f) +
+            (20.dp - 20.dp * ((focusScaleX + focusScaleY) / 2f)) * p
+        if (request != null) Box(Modifier.fillMaxSize()
+            .background(Color.Black.copy(alpha = .5f * p))
+            .pointerInput(folder.id) { detectTapGestures(onTap = { close() }) })
+        if (request != null) {
+            Box(Modifier.offset(x = startLeft + (targetLeft - startLeft) * p,
+                    y = (startTop + (targetTop - startTop) * p - 56.dp).coerceAtLeast(0.dp))
+                .width(currentWidth).height(48.dp).graphicsLayer { alpha = p },
+                contentAlignment = Alignment.Center) {
+                Text(folder.name, color = White, fontSize = 27.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        FolderPanel(
+            modifier = Modifier.offset(x = startLeft + (targetLeft - startLeft) * p,
+                    y = startTop + (targetTop - startTop) * p)
+                .size(currentWidth, currentHeight)
+                .then(if (request == null && !coveredByOpenFolder) Modifier.pointerInput(folder.id) {
+                    detectTapGestures(onTap = { onFolderClick(entry) })
+                } else if (request != null) Modifier.pointerInput(pageCount, page) {
+                    var swipeDistance = 0f
+                    detectHorizontalDragGestures(onDragCancel = { swipeDistance = 0f }, onDragEnd = {
+                        if (swipeDistance < -60f) changePage(page + 1)
+                        if (swipeDistance > 60f) changePage(page - 1)
+                        swipeDistance = 0f
+                    }) { change, amount ->
+                        change.consume()
+                        swipeDistance += amount
+                    }
+                } else Modifier),
+            corner = cornerX,
+            cornerY = cornerY,
+            tint = lerp(Color(0xB8DCE4EA), panelTint, p),
+            insetX = insetX,
+            insetY = insetY,
+            gapX = gapX,
+            gapY = gapY,
+            footer = {
+                Box(Modifier.fillMaxWidth().height(0.dp)) {
+                    Box(Modifier.align(Alignment.TopCenter).offset(y = 6.dp).graphicsLayer { alpha = p }) {
+                        FolderPageIndicator(page, pageCount, indicatorStyle)
+                    }
+                }
+            }
+        ) { cell, cellModifier ->
+            val row = cell / 3
+            val col = cell % 3
+            val globalIndex = page * 9 + cell
+            val app = members.getOrNull(globalIndex)
+            val isAdd = !picking && globalIndex == members.size
+            if (app == null && !isAdd) {
+                Spacer(cellModifier)
+            } else {
+                var focused by remember(folder.id, cell) { mutableStateOf(false) }
+                var cellBounds by remember(folder.id, cell) { mutableStateOf(Rect.Zero) }
+                val canFocusCell = request != null && !closing
+                val activateCell = {
+                    if (isAdd) close(onAdd)
+                    else if (app != null && picking) onPick(app)
+                    else if (app != null && launchBehavior == DesktopPreferences.FolderLaunchBehavior.KEEP_OPEN) onLaunch(app)
+                    else if (app != null) close { onLaunch(app) }
+                }
+                val zoom by animateFloatAsState(if (focused && canFocusCell) 1.08f else 1f,
+                    focusScaleMotion(focused && canFocusCell), label = "folder-cell-focus")
+                Box(cellModifier
+                    .onGloballyPositioned { cellBounds = it.boundsInRoot() }
+                    .graphicsLayer {
+                        alpha = if (isAdd) p else 1f
+                        scaleX = zoom; scaleY = zoom
+                    }
+                    .focusRequester(cellFocus[cell])
+                    .focusProperties { canFocus = canFocusCell }
+                    .onFocusChanged { focused = it.isFocused }
+                    .onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyDown && event.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_MENU &&
+                            event.nativeKeyEvent.repeatCount == 0 && app != null) {
+                            onMenu(app, cellBounds, cellFocus[cell]); true
+                        }
+                        else if (event.type != KeyEventType.KeyDown) false
+                        else when {
+                            canFocusCell && (event.key == Key.Enter || event.key == Key.NumPadEnter ||
+                                event.key == Key.DirectionCenter || event.key == Key.Spacebar) -> {
+                                activateCell(); true
+                            }
+                            event.key == Key.DirectionRight && col == 2 && page < pageCount - 1 -> { changePage(page + 1, row * 3); true }
+                            event.key == Key.DirectionLeft && col == 0 && page > 0 -> { changePage(page - 1, row * 3 + 2); true }
+                            else -> false
+                        }
+                    }
+                    .combinedClickable(enabled = canFocusCell, indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = { activateCell() },
+                        onLongClick = { if (app != null) onMenu(app, cellBounds, cellFocus[cell]) })
+                    .clip(RoundedCornerShape(cellCorner))) {
+                    if (isAdd) {
+                        Box(Modifier.fillMaxSize().background(Color.White), contentAlignment = Alignment.Center) {
+                            Canvas(Modifier.size(28.dp)) {
+                                val center = Offset(size.width / 2f, size.height / 2f)
+                                val half = 9.dp.toPx()
+                                val stroke = 2.dp.toPx()
+                                drawLine(Color.Black, Offset(center.x - half, center.y), Offset(center.x + half, center.y), stroke, cap = StrokeCap.Round)
+                                drawLine(Color.Black, Offset(center.x, center.y - half), Offset(center.x, center.y + half), stroke, cap = StrokeCap.Round)
+                            }
+                        }
+                    } else if (app != null) FolderAppVisual(app, Modifier.fillMaxSize(), cellCorner)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FolderPageIndicator(page: Int, count: Int, style: DesktopPreferences.FolderPageIndicator, modifier: Modifier = Modifier) {
+    if (count <= 1) { Spacer(modifier.height(14.dp)); return }
+    Row(modifier.height(14.dp), horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
+        repeat(count) { index ->
+            val active = index == page
+            Box(Modifier
+                .width(if (style == DesktopPreferences.FolderPageIndicator.BARS) 22.dp else if (active) 10.dp else 8.dp)
+                .height(if (style == DesktopPreferences.FolderPageIndicator.BARS) 4.dp else if (active) 10.dp else 8.dp)
+                .clip(RoundedCornerShape(50))
+                .background(Color.White.copy(alpha = if (active) 1f else .42f)))
+        }
+    }
+}
+
+@Composable
+private fun FolderStagingTray(
+    apps: List<DockApp>,
+    target: Offset,
+    completing: Boolean,
+    focusRequester: FocusRequester,
+    onComplete: () -> Unit,
+    onAnimationFinished: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var focused by remember { mutableStateOf(false) }
+    val progress = remember { Animatable(0f) }
+    LaunchedEffect(completing) {
+        if (completing) {
+            progress.snapTo(0f)
+            progress.animateTo(1f, tween(RenderPerformance.duration(520), easing = PageTransitionEasing))
+            onAnimationFinished()
+        }
+    }
+    val expandedHeight = (apps.size.coerceAtLeast(1) * 66 + 58).coerceAtMost(510).dp
+    Column(
+        modifier.onFocusChanged { focused = it.hasFocus }
+            .clip(RoundedCornerShape(24.dp))
+            .background(Color(0xD91A2027))
+            .border(1.dp, Color.White.copy(alpha = .22f), RoundedCornerShape(24.dp))
+            .padding(10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Box(Modifier.width(78.dp).height(if (focused) expandedHeight - 58.dp else 78.dp)) {
+            apps.forEachIndexed { index, app ->
+                var center by remember(appKey(app)) { mutableStateOf(Offset.Zero) }
+                val delay = (index.coerceAtMost(12) * .035f)
+                val localProgress = ((progress.value - delay) / (1f - delay)).coerceIn(0f, 1f)
+                FolderAppVisual(app, Modifier.size(62.dp)
+                    .offset(y = if (focused) (index * 66).dp else (index.coerceAtMost(5) * 3).dp)
+                    .zIndex(index.toFloat())
+                    .onGloballyPositioned { center = it.boundsInRoot().center }
+                    .graphicsLayer {
+                        translationX = (target.x - center.x) * localProgress
+                        translationY = (target.y - center.y) * localProgress
+                        scaleX = 1f - .72f * localProgress
+                        scaleY = scaleX
+                        alpha = 1f - .15f * localProgress
+                    })
+            }
+        }
+        val interaction = remember { MutableInteractionSource() }
+        var doneFocused by remember { mutableStateOf(false) }
+        Text("完成", color = if (apps.isNotEmpty()) Color.White else Color.White.copy(alpha = .35f), fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.clip(RoundedCornerShape(13.dp))
+                .background(if (doneFocused) Color(0xFF568DB1) else Color(0xFF313A44))
+                .focusRequester(focusRequester)
+                .hoverable(interaction, apps.isNotEmpty()).onFocusChanged { doneFocused = it.isFocused }
+                .focusable(apps.isNotEmpty())
+                .clickable(interactionSource = interaction, indication = null, enabled = apps.isNotEmpty() && !completing, onClick = onComplete)
+                .padding(horizontal = 16.dp, vertical = 9.dp))
+    }
+}
+
+@Composable
+private fun FolderAppPicker(folder: HomeFolder, apps: List<DockApp>, onDismiss: () -> Unit, onConfirm: (List<String>) -> Unit) {
+    val staged = remember(folder.id) { mutableStateListOf<String>() }
+    HomeDialogSurface("添加到文件夹", "选择一个或多个应用", onDismiss, Modifier.fillMaxWidth(.82f).fillMaxHeight(.78f)) {
+        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(26.dp)) {
+            Column(Modifier.weight(1.35f).fillMaxHeight()) {
+                LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    items(apps, key = { appKey(it) }) { app ->
+                        val selected = appKey(app) in staged
+                        val interaction = remember { MutableInteractionSource() }
+                        val hovered by interaction.collectIsHoveredAsState()
+                        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(if (selected) DialogAccent.copy(alpha = .22f) else if (hovered) Color.White.copy(alpha = .14f) else Color.Transparent)
+                            .hoverable(interaction).clickable(interactionSource = interaction, indication = null) { val key = appKey(app); if (key in staged) staged.remove(key) else staged.add(key) }
+                            .padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(15.dp)) {
+                            app.icon?.let { DockAppArtwork(it, app.name, Modifier.size(44.dp)) } ?: LineIcon("grid", Modifier.size(44.dp))
+                            Text(app.name, color = Color.White, fontSize = 19.sp, modifier = Modifier.weight(1f), maxLines = 1)
+                            if (selected) LineIcon("pin", Modifier.size(22.dp))
+                        }
+                    }
+                }
+            }
+            Column(Modifier.width(260.dp).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("已选择 · ${staged.size}", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    staged.takeLast(4).forEachIndexed { index, key ->
+                        val app = apps.firstOrNull { appKey(it) == key }
+                        Box(Modifier.offset(x = (index * 10).dp, y = (-index * 12).dp).size(82.dp).clip(RoundedCornerShape(18.dp))
+                            .background(Color(0xFF343943)).border(1.dp, Color.White.copy(alpha = .32f), RoundedCornerShape(22.dp)), contentAlignment = Alignment.Center) {
+                            app?.icon?.let { DockAppArtwork(it, app.name, Modifier.size(54.dp)) } ?: LineIcon("grid", Modifier.size(40.dp))
+                        }
+                    }
+                    if (staged.isEmpty()) Text("点击左侧应用暂存", color = Color.White.copy(alpha = .65f), fontSize = 17.sp)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    HomeDialogAction("取消", onClick = onDismiss)
+                    HomeDialogAction("确认添加", onClick = { onConfirm(staged.toList()) }, primary = true, enabled = staged.isNotEmpty())
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WidgetProviderDialog(title: String, providers: List<AppWidgetProviderInfo>, onDismiss: () -> Unit, onChoose: (AppWidgetProviderInfo) -> Unit) {
+    val context = LocalContext.current
+    HomeDialogSurface("选择小组件", title, onDismiss, Modifier.width(540.dp).heightIn(max = 560.dp)) {
+            LazyColumn(Modifier.weight(1f, fill = false)) {
+                items(providers, key = { it.provider.flattenToString() }) { provider ->
+                    val label = runCatching { provider.loadLabel(context.packageManager) }.getOrDefault(provider.provider.className)
+                    MenuRow(label, { onChoose(provider) }, "widgets")
+                }
+            }
+    }
+}
+
+@Composable
+private fun WidgetSizeDialog(provider: AppWidgetProviderInfo, onDismiss: () -> Unit, onChoose: (Int, Int) -> Unit) {
+    HomeDialogSurface("选择尺寸", "稍后仍可在桌面编辑中调整", onDismiss, Modifier.width(500.dp)) {
+            listOf(180 to 120, 300 to 180, 420 to 260).forEachIndexed { index, size ->
+                MenuRow(listOf("小 · 1 × 1", "中 · 2 × 1", "大 · 2 × 2")[index], { onChoose(size.first.coerceAtLeast(provider.minWidth), size.second.coerceAtLeast(provider.minHeight)) }, "widgets")
+            }
+    }
+}
+
 /** Brand gradient: preserve HSL hue/saturation and vary lightness by 5%. */
 private fun createBrandGradient(baseColor: Color): Brush {
     val baseHsl = FloatArray(3)
@@ -795,7 +2948,7 @@ private fun createBrandGradient(baseColor: Color): Brush {
             previous = current
             current = icon
             fade.snapTo(0f)
-            fade.animateTo(1f, tween(180))
+            fade.animateTo(1f, tween(RenderPerformance.duration(SELECTION_TRANSITION_MS)))
             previous = null
         }
     }
@@ -814,42 +2967,40 @@ private fun createBrandGradient(baseColor: Color): Brush {
 @Composable
 private fun HomeClock(clockStyle: DesktopPreferences.ClockStyle) {
     if (clockStyle == DesktopPreferences.ClockStyle.OFF) return
+    val context = LocalContext.current
+    val prefVersion = DesktopPreferences.version
+    val timeFormat = remember(prefVersion) { DesktopPreferences.TimeFormat.current(context) }
+    val showSeconds = remember(prefVersion) { DesktopPreferences.ClockDisplay.showSeconds(context) }
+    val dateDisplay = remember(prefVersion) { DesktopPreferences.DateDisplay.current(context) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(clockStyle) {
-        val interval = if (clockStyle == DesktopPreferences.ClockStyle.STANDARD) 1000L else 60_000L
+    LaunchedEffect(showSeconds) {
+        val interval = if (showSeconds) 1000L else 60_000L
         while (true) { now = System.currentTimeMillis(); delay(interval - now % interval) }
     }
     val date = Date(now)
-    val timeTextStandard = SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(date)
-    val timeTextMinimal = SimpleDateFormat("HH:mm", Locale.CHINA).format(date)
-    val gregorianDateText = SimpleDateFormat("EEEE  M月d日", Locale.CHINA).format(date)
-    val lunarDateText = remember(now / 60_000) {
-        runCatching {
-            val lunar = ChineseCalendar().apply { timeInMillis = now }
-            val months = listOf("正", "二", "三", "四", "五", "六", "七", "八", "九", "十", "冬", "腊")
-            val day = lunar.get(Calendar.DAY_OF_MONTH)
-            val numbers = listOf("一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
-            val lunarDay = when (day) {
-                10 -> "初十"; 20 -> "二十"; 30 -> "三十"
-                else -> listOf("初", "十", "廿")[((day - 1) / 10).coerceIn(0, 2)] + numbers[((day - 1) % 10).coerceIn(0, 9)]
-            }
-            val monthIdx = lunar.get(Calendar.MONTH).coerceIn(0, 11)
-            "农历" + (if (lunar.get(ChineseCalendar.IS_LEAP_MONTH) == 1) "闰" else "") + months[monthIdx] + "月" + lunarDay
-        }.getOrDefault("")
+    val formatter = remember(timeFormat, showSeconds) {
+        SimpleDateFormat(DesktopPreferences.ClockDisplay.pattern(timeFormat, showSeconds), Locale.CHINA)
     }
-    val fullDateText = if (lunarDateText.isNotBlank()) "$gregorianDateText  $lunarDateText" else gregorianDateText
+    val timeTextStandard = formatter.format(date)
+    val timeTextMinimal = timeTextStandard
+    val (gregorianDateText, lunarDateText) = remember(now / 60_000, dateDisplay) {
+        DesktopPreferences.ClockDisplay.dateLines(now, dateDisplay)
+    }
+    val fullDateText = listOf(gregorianDateText, lunarDateText).filter { it.isNotBlank() }.joinToString("  ")
     when (clockStyle) {
         DesktopPreferences.ClockStyle.STANDARD -> {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     timeTextStandard,
-                    Modifier.staggeredEntrance(0),
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    modifier = Modifier.staggeredEntrance(0),
                     color = Color.White,
                     fontSize = 136.sp,
                     lineHeight = 148.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = (-3).sp
                 )
+                if (fullDateText.isNotBlank()) {
                 Spacer(Modifier.height(12.dp))
                 Text(
                     fullDateText,
@@ -858,19 +3009,22 @@ private fun HomeClock(clockStyle: DesktopPreferences.ClockStyle) {
                     fontSize = 25.sp,
                     letterSpacing = 1.sp
                 )
+                }
             }
         }
         DesktopPreferences.ClockStyle.MINIMAL -> {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     timeTextMinimal,
-                    Modifier.staggeredEntrance(0),
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    modifier = Modifier.staggeredEntrance(0),
                     color = Color.White,
                     fontSize = 152.sp,
                     lineHeight = 156.sp,
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = (-2).sp
                 )
+                if (fullDateText.isNotBlank()) {
                 Spacer(Modifier.height(8.dp))
                 Text(
                     fullDateText,
@@ -879,6 +3033,7 @@ private fun HomeClock(clockStyle: DesktopPreferences.ClockStyle) {
                     fontSize = 24.sp,
                     letterSpacing = 0.8.sp
                 )
+                }
             }
         }
         DesktopPreferences.ClockStyle.SPLIT -> {
@@ -888,12 +3043,14 @@ private fun HomeClock(clockStyle: DesktopPreferences.ClockStyle) {
             ) {
                 Text(
                     timeTextMinimal,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                     color = Color.White,
                     fontSize = 120.sp,
                     lineHeight = 126.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = (-2).sp
                 )
+                if (fullDateText.isNotBlank()) {
                 Box(
                     Modifier
                         .padding(horizontal = 28.dp)
@@ -902,6 +3059,7 @@ private fun HomeClock(clockStyle: DesktopPreferences.ClockStyle) {
                         .background(Color(0x4DFFFFFF))
                 )
                 Column {
+                    if (gregorianDateText.isNotBlank()) {
                     Text(
                         gregorianDateText,
                         color = Color.White,
@@ -909,6 +3067,7 @@ private fun HomeClock(clockStyle: DesktopPreferences.ClockStyle) {
                         fontWeight = FontWeight.SemiBold,
                         letterSpacing = 0.5.sp
                     )
+                    }
                     if (lunarDateText.isNotBlank()) {
                         Spacer(Modifier.height(6.dp))
                         Text(
@@ -918,6 +3077,7 @@ private fun HomeClock(clockStyle: DesktopPreferences.ClockStyle) {
                             letterSpacing = 0.5.sp
                         )
                     }
+                }
                 }
             }
         }

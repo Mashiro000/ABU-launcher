@@ -8,12 +8,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 object MediaLibraryManager {
 
     private const val CACHE_VERSION = 2
 
     private val providerCache = mutableMapOf<String, MediaSourceProvider>()
+    private val metadataLocks = mutableMapOf<String, Mutex>()
     private val scope = CoroutineScope(Dispatchers.Main)
 
     val resumeWatching = mutableStateListOf<MediaItemInfo>()
@@ -34,6 +37,7 @@ object MediaLibraryManager {
     fun init(context: android.content.Context) {
         if (cacheFile == null) {
             cacheFile = java.io.File(context.filesDir, "media_library_cache.json")
+            MediaMetadataCache.init(context)
             loadFromCache()
         }
     }
@@ -120,6 +124,42 @@ object MediaLibraryManager {
     fun getProviderByAccountId(accountId: String): MediaSourceProvider? {
         val account = AccountManager.accounts.find { it.id == accountId } ?: return null
         return getProvider(account)
+    }
+
+    private fun metadataLock(key: String): Mutex = synchronized(metadataLocks) { metadataLocks.getOrPut(key) { Mutex() } }
+
+    suspend fun cachedEpisodes(accountId: String, seriesId: String): List<EpisodeInfo> {
+        val key = "$accountId:$seriesId"
+        MediaMetadataCache.episodes(key)?.let { return it }
+        return metadataLock("episodes:$key").withLock {
+            MediaMetadataCache.episodes(key)?.let { return@withLock it }
+            val provider = getProviderByAccountId(accountId) ?: AccountManager.accounts.find { it.enabled }?.let(::getProvider)
+            val value = runCatching { provider?.getEpisodes(seriesId).orEmpty() }.getOrDefault(emptyList())
+            if (value.isNotEmpty()) MediaMetadataCache.putEpisodes(key, value)
+            value
+        }
+    }
+
+    suspend fun cachedItemDetail(accountId: String, itemId: String): MediaDetailInfo? {
+        val key = "$accountId:$itemId"
+        MediaMetadataCache.detail(key)?.let { return it }
+        return metadataLock("detail:$key").withLock {
+            MediaMetadataCache.detail(key)?.let { return@withLock it }
+            val provider = getProviderByAccountId(accountId) ?: AccountManager.accounts.find { it.enabled }?.let(::getProvider)
+            runCatching { provider?.getItemDetail(itemId) }.getOrNull()?.also { MediaMetadataCache.putDetail(key, it) }
+        }
+    }
+
+    suspend fun cachedSimilar(accountId: String, itemId: String): List<MediaItemInfo> {
+        val key = "$accountId:$itemId"
+        MediaMetadataCache.similar(key)?.let { return it }
+        return metadataLock("similar:$key").withLock {
+            MediaMetadataCache.similar(key)?.let { return@withLock it }
+            val provider = getProviderByAccountId(accountId) ?: AccountManager.accounts.find { it.enabled }?.let(::getProvider)
+            val value = runCatching { provider?.getSimilar(itemId).orEmpty() }.getOrDefault(emptyList())
+            if (value.isNotEmpty()) MediaMetadataCache.putSimilar(key, value)
+            value
+        }
     }
 
     fun refresh(onComplete: (() -> Unit)? = null) {
@@ -209,7 +249,7 @@ object MediaLibraryManager {
         if (item.mediaType != "Series") return item
         val provider = getProviderByAccountId(item.accountId) ?: return item
         val seriesId = item.seriesId ?: item.id
-        val episodes = runCatching { provider.getEpisodes(seriesId) }.getOrDefault(emptyList())
+        val episodes = cachedEpisodes(item.accountId, seriesId)
         val episode = episodes.firstOrNull { it.streamUrl.isNotBlank() } ?: return item
         return MediaItemInfo(
             id = episode.id,
@@ -236,9 +276,9 @@ object MediaLibraryManager {
      */
     suspend fun buildPlaybackInfo(item: MediaItemInfo, title: String, startMs: Long): TvPlaybackInfo {
         val provider = getProviderByAccountId(item.accountId)
-        val detail = runCatching { provider?.getItemDetail(item.id) }.getOrNull()
+        val detail = cachedItemDetail(item.accountId, item.id)
         val episodes = if (item.mediaType == "Series" || item.mediaType == "Episode") {
-            runCatching { provider?.getEpisodes(item.seriesId ?: item.id).orEmpty() }.getOrDefault(emptyList())
+            cachedEpisodes(item.accountId, item.seriesId ?: item.id)
         } else emptyList()
 
         val playlist = episodes.map { ep ->
@@ -275,13 +315,18 @@ object MediaLibraryManager {
             "S%02d E%02d".format(item.seasonNumber.coerceAtLeast(1), item.episodeNumber.coerceAtLeast(1))
         } else ""
 
+        val mustResolveEmbyPolicy = item.serverType in listOf(ServerType.EMBY, ServerType.JELLYFIN) &&
+            AccountManager.embyPlaybackPolicy.value != AccountManager.EmbyPlaybackPolicy.PREFER_DIRECT
+        val resolvedStreamUrl = if (item.streamUrl.isBlank() || mustResolveEmbyPolicy) {
+            runCatching { provider?.getStreamUrl(item.id).orEmpty() }.getOrDefault(item.streamUrl)
+        } else item.streamUrl
         return TvPlaybackInfo(
             mediaId = item.id,
             title = title.ifBlank { item.title },
             seasonEpisodeText = seText,
             metaSubtitle = meta,
             qualityTag = quality,
-            streamUrl = item.streamUrl,
+            streamUrl = resolvedStreamUrl,
             backdropUrl = item.backdropUrl,
             startPositionMs = startMs,
             totalDurationMs = if (item.totalDurationMs > 0) item.totalDurationMs else detail?.runtimeMs ?: 0L,

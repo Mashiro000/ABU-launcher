@@ -23,9 +23,13 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -34,6 +38,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -58,11 +63,15 @@ fun MediaLibrarySettings(
         firstFocus.requestFocus()
     }
 
+    val childOpen = showAddDialog || editingAccount != null || selectedAccountForManage != null
+    val baseOffset by animateFloatAsState(if (childOpen) -1f else 0f,
+        tween(RenderPerformance.duration(240)), label = "media-parent-slide")
     Column(
         Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(top = 12.dp, bottom = 48.dp)
+            .fillMaxSize().graphicsLayer { translationX = size.width * baseOffset }
+            .focusProperties { onEnter = { if (childOpen) cancelFocusChange() } }.focusGroup()
+            .settingsVerticalScroll()
+            .padding(top = 32.dp, bottom = 68.dp)
     ) {
         // Top Header
         Row(
@@ -324,7 +333,8 @@ private fun LibraryPreferenceRow(
             .background(if (focused) Color.White else Color(0x14FFFFFF))
             .border(1.5.dp, if (focused) Color.White else Color(0x22FFFFFF), ContinuousCornerShape(16.dp))
             .clickable(interactionSource = interaction, indication = null) { onToggle(!enabled) }
-            .focusable(interactionSource = interaction)
+            .settingsAutoScroll()
+            .focusProperties { canFocus = true }
             .padding(horizontal = 22.dp, vertical = 17.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -353,7 +363,8 @@ private fun EmbyPlaybackPolicyRow() {
                 val values = AccountManager.EmbyPlaybackPolicy.entries
                 AccountManager.setEmbyPlaybackPolicy(values[(policy.ordinal + 1) % values.size])
             }
-            .focusable(interactionSource = interaction)
+            .settingsAutoScroll()
+            .focusProperties { canFocus = true }
             .padding(horizontal = 22.dp, vertical = 17.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -387,7 +398,8 @@ private fun AccountItemRow(
                 ContinuousCornerShape(16.dp)
             )
             .clickable(interactionSource = interaction, indication = null) { onClick() }
-            .focusable(interactionSource = interaction)
+            .settingsAutoScroll()
+            .focusProperties { canFocus = true }
             .padding(horizontal = 24.dp, vertical = 18.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -434,7 +446,7 @@ private fun AccountItemRow(
             if (account.includeInAggregate) {
                 Text(
                     "聚合",
-                    color = if (focused) Color(0xFF3875F6) else Color(0xFF60A5FA),
+                    color = if (focused) Color(0xFF141414) else Color(0xFF60A5FA),
                     fontSize = 14.sp,
                     modifier = Modifier.padding(end = 12.dp)
                 )
@@ -480,7 +492,8 @@ private fun ModeOptionCard(
                 ContinuousCornerShape(16.dp)
             )
             .clickable(interactionSource = interaction, indication = null) { onClick() }
-            .focusable(interactionSource = interaction)
+            .settingsAutoScroll()
+            .focusProperties { canFocus = true }
             .padding(20.dp)
     ) {
         Row(
@@ -495,7 +508,7 @@ private fun ModeOptionCard(
                 fontWeight = FontWeight.Bold
             )
             if (isSelected) {
-                Text("✓ 当前", color = if (focused) Color(0xFF3875F6) else Color(0xFF60A5FA), fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                Text("✓ 当前", color = if (focused) Color(0xFF141414) else Color(0xFF60A5FA), fontSize = 14.sp, fontWeight = FontWeight.Bold)
             }
         }
         Spacer(Modifier.height(8.dp))
@@ -526,7 +539,8 @@ private fun TvOptionChip(
                 else Color(0x1EFFFFFF)
             )
             .clickable(interactionSource = interaction, indication = null) { onClick() }
-            .focusable(interactionSource = interaction)
+            .settingsAutoScroll()
+            .focusProperties { canFocus = true }
             .padding(horizontal = 20.dp, vertical = 10.dp)
     ) {
         Text(
@@ -558,7 +572,8 @@ private fun TvButton(
                 else Color(0x26FFFFFF)
             )
             .clickable(interactionSource = interaction, indication = null) { onClick() }
-            .focusable(interactionSource = interaction)
+            .settingsAutoScroll()
+            .focusProperties { canFocus = true }
             .padding(horizontal = 22.dp, vertical = 12.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -578,8 +593,8 @@ private fun AddServerDialog(
     onSaved: (MediaAccount) -> Unit
 ) {
     var selectedType by remember { mutableStateOf(initialAccount?.type ?: ServerType.EMBY) }
-    var name by remember { mutableStateOf(initialAccount?.name ?: "我的 Emby") }
-    var host by remember { mutableStateOf(initialAccount?.serverUrl ?: "http://192.168.1.100:8096") }
+    var name by remember { mutableStateOf(initialAccount?.name.orEmpty()) }
+    var host by remember { mutableStateOf(initialAccount?.serverUrl.orEmpty()) }
     var username by remember { mutableStateOf(initialAccount?.username.orEmpty()) }
     var password by remember { mutableStateOf("") }
     var token by remember { mutableStateOf(initialAccount?.token.orEmpty()) }
@@ -589,16 +604,20 @@ private fun AddServerDialog(
 
     val scope = rememberCoroutineScope()
 
-    Dialog(onDismissRequest = onDismiss) {
+    val screenHeight = LocalConfiguration.current.screenHeightDp.dp
+    SettingsInlinePage(onDismiss) {
         Box(
             modifier = Modifier
-                .width(680.dp)
+                .fillMaxWidth()
+
+                .widthIn(max = 680.dp)
+                .heightIn(max = screenHeight * 0.9f)
                 .clip(ContinuousCornerShape(24.dp))
                 .background(Color(0xFF1A1D24))
-                .border(1.5.dp, Color(0x40FFFFFF), ContinuousCornerShape(24.dp))
-                .padding(36.dp)
+
+                .padding(24.dp)
         ) {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(
                     if (initialAccount == null) "添加媒体服务器" else "编辑媒体服务器",
                     color = White,
@@ -616,12 +635,8 @@ private fun AddServerDialog(
                             isSelected = selectedType == type,
                             onClick = {
                                 selectedType = type
-                                name = "我的 ${type.displayName}"
-                                host = when (type) {
-                                    ServerType.EMBY, ServerType.JELLYFIN -> "http://192.168.1.100:8096"
-                                    ServerType.PLEX -> "http://192.168.1.100:32400"
-                                    ServerType.WEBDAV_ALIST -> "http://192.168.1.100:5244"
-                                }
+                                name = ""
+                                host = ""
                             }
                         )
                     }
@@ -629,22 +644,27 @@ private fun AddServerDialog(
 
                 Spacer(Modifier.height(20.dp))
 
-                TvInputField(label = "名称", value = name, onValueChange = { name = it })
+                TvInputField(label = "名称", placeholder = "例如：客厅 Emby", value = name, onValueChange = { name = it })
                 Spacer(Modifier.height(12.dp))
-                TvInputField(label = "服务器地址 (URL)", value = host, onValueChange = { host = it })
+                val addressHint = when (selectedType) {
+                    ServerType.EMBY, ServerType.JELLYFIN -> "例如：http://192.168.1.100:8096"
+                    ServerType.PLEX -> "例如：http://192.168.1.100:32400"
+                    ServerType.WEBDAV_ALIST -> "例如：http://192.168.1.100:5244"
+                }
+                TvInputField(label = "服务器地址 (URL)", placeholder = addressHint, value = host, onValueChange = { host = it })
                 Spacer(Modifier.height(12.dp))
 
                 if (selectedType == ServerType.PLEX) {
-                    TvInputField(label = "X-Plex-Token", value = token, onValueChange = { token = it })
+                    TvInputField(label = "X-Plex-Token", placeholder = "输入 Plex 访问令牌", value = token, onValueChange = { token = it })
                 } else if (selectedType == ServerType.WEBDAV_ALIST) {
-                    TvInputField(label = "Alist Token (若无需密码可留空)", value = token, onValueChange = { token = it })
+                    TvInputField(label = "Alist Token（可留空）", placeholder = "输入 Alist 令牌", value = token, onValueChange = { token = it })
                 } else {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         Box(Modifier.weight(1f)) {
-                            TvInputField(label = "用户名", value = username, onValueChange = { username = it })
+                            TvInputField(label = "用户名", placeholder = "输入用户名", value = username, onValueChange = { username = it })
                         }
                         Box(Modifier.weight(1f)) {
-                            TvInputField(label = "密码", value = password, isPassword = true, onValueChange = { password = it })
+                            TvInputField(label = "密码", placeholder = "输入密码", value = password, isPassword = true, onValueChange = { password = it })
                         }
                     }
                 }
@@ -683,6 +703,10 @@ private fun AddServerDialog(
                     TvButton(
                         text = if (testing) "测试中..." else "测试连接",
                         onClick = {
+                            if (name.isBlank() || host.isBlank()) {
+                                testStatus = "请填写服务器名称和地址"
+                                return@TvButton
+                            }
                             if (!AccountManager.allowInsecureConnections.value && host.trim().startsWith("http://", true)) {
                                 testStatus = "失败: 当前禁止 HTTP，请改用 HTTPS 或在媒体库设置中允许"
                                 return@TvButton
@@ -714,6 +738,10 @@ private fun AddServerDialog(
                         text = "保存并启用",
                         isPrimary = true,
                         onClick = {
+                            if (name.isBlank() || host.isBlank()) {
+                                testStatus = "请填写服务器名称和地址"
+                                return@TvButton
+                            }
                             if (!AccountManager.allowInsecureConnections.value && host.trim().startsWith("http://", true)) {
                                 testStatus = "失败: 当前禁止 HTTP，请改用 HTTPS 或在媒体库设置中允许"
                                 return@TvButton
@@ -757,13 +785,13 @@ private fun AccountManageDialog(
     onTest: () -> Unit,
     onDelete: () -> Unit
 ) {
-    Dialog(onDismissRequest = onDismiss) {
+    SettingsInlinePage(onDismiss) {
         Box(
             modifier = Modifier
-                .width(540.dp)
+                .fillMaxWidth()
                 .clip(ContinuousCornerShape(24.dp))
                 .background(Color(0xFF1A1D24))
-                .border(1.5.dp, Color(0x40FFFFFF), ContinuousCornerShape(24.dp))
+
                 .padding(32.dp)
         ) {
             Column {
@@ -866,19 +894,20 @@ private fun ManageOptionRow(
             .clip(RoundedCornerShape(12.dp))
             .background(if (focused) Color.White else Color(0x1AFFFFFF))
             .clickable(interactionSource = interaction, indication = null) { onClick() }
-            .focusable(interactionSource = interaction)
+            .focusProperties { canFocus = true }
             .padding(horizontal = 16.dp, vertical = 14.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(label, color = if (focused) Color.Black else White, fontSize = 16.sp)
-        Text(value, color = if (focused) Color(0xFF3875F6) else Color(0xFF60A5FA), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Text(value, color = if (focused) Color(0xFF141414) else Color(0xFF60A5FA), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
 @Composable
 private fun TvInputField(
     label: String,
+    placeholder: String,
     value: String,
     onValueChange: (String) -> Unit,
     isPassword: Boolean = false
@@ -900,8 +929,14 @@ private fun TvInputField(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
                 .background(if (focused) Color.White else Color(0x26FFFFFF))
-                .border(1.dp, if (focused) Color(0xFF3875F6) else Color(0x33FFFFFF), RoundedCornerShape(10.dp))
-                .padding(horizontal = 14.dp, vertical = 12.dp)
+                .border(1.dp, if (focused) Color(0xFF141414) else Color(0x33FFFFFF), RoundedCornerShape(10.dp))
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            decorationBox = { innerTextField ->
+                Box {
+                    if (value.isEmpty()) Text(placeholder, color = if (focused) Color(0xFF707782) else Color(0xFF9AA1AD), fontSize = 16.sp)
+                    innerTextField()
+                }
+            }
         )
     }
 }

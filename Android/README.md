@@ -1,6 +1,8 @@
 # ABU Launcher (阿布桌面)
 
-Kotlin + Jetpack Compose 独立 Android TV 原生工程，不依赖 Flutter。最低 Android 9（API 28）。
+Kotlin + Jetpack Compose 独立 Android TV 原生工程，不依赖 Flutter。最低 Android 7.1（API 25）。
+
+Android 7.1 使用内置 Media3 播放器；可选 MPV 播放器插件要求 Android 8.0（API 26）或更高版本。
 
 ## 当前范围
 
@@ -23,7 +25,7 @@ Kotlin + Jetpack Compose 独立 Android TV 原生工程，不依赖 Flutter。�
 
 界面采用参考图 1672 × 941 设计坐标，按真实可用像素统一缩放，字体缩放固定。16:9 的 720p、1080p、4K 展示比例相同；其他屏幕比例居中等比适配并留边，不拉伸。继续观看仅一行；首屏不会因像素更多而提前显示下一组内容。
 
-Android 13（API 33）及以上使用 Haze 1.7.2 的 `hazeSource` / `hazeEffect`，导航采用真实背景模糊及 `HazeProgressive.verticalGradient`。Android 9–12 使用后台线程计算、缓存的低分辨率壁纸模糊；它模糊静态壁纸，不实时采样滚动媒体货架，也不等同于实时渐进模糊。
+Android 13（API 33）及以上使用 Haze 1.7.2 的 `hazeSource` / `hazeEffect`，导航采用真实背景模糊及 `HazeProgressive.verticalGradient`。Android 7.1–12 使用后台线程计算、缓存的低分辨率壁纸模糊；它模糊静态壁纸，不实时采样滚动媒体货架，也不等同于实时渐进模糊。
 
 媒体库背景随下滑距离连续变暗。Android 13 以上壁纸 Haze 模糊半径从 0 增至 50 设计 dp；兼容路径叠加已渲染的模糊壁纸，透明度从 0% 增至 100%。货架没有独立黑色底板，封面和文字保持清晰。
 
@@ -33,7 +35,7 @@ Haze 文档：https://chrisbanes.github.io/haze/1.5.4/usage/
 
 ## 构建
 
-Android Studio 打开本目录。需要 JDK 17 以上、Android SDK 36.1；工程使用 Gradle 9.5.0 / AGP 9.3.2。编译 SDK 的版本不改变最低运行版本 Android 9。
+Android Studio 打开本目录。需要 JDK 17 以上、Android SDK 36.1；工程使用 Gradle 9.5.0 / AGP 9.3.2。编译 SDK 的版本不改变最低运行版本 Android 7.1（API 25）。
 
 ```powershell
 ./gradlew.bat assembleDebug

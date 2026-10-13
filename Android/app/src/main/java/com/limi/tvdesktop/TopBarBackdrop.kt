@@ -31,7 +31,6 @@ internal fun TopBarBackdrop(source: HazeState, reveal: () -> Float) {
             Box(Modifier.fillMaxSize().hazeEffect(source) {
                 blurEnabled = reveal() > 0f
                 blurRadius = (navBlur * reveal().coerceIn(0f, 1f)).coerceAtLeast(.01f).dp
-                progressive = HazeProgressive.verticalGradient(startIntensity = 1f, endIntensity = 0f)
                 backgroundColor = Color.Transparent
                 tints = emptyList()
                 fallbackTint = HazeTint(Color.Transparent)

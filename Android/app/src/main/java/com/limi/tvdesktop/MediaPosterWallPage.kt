@@ -294,11 +294,11 @@ private fun PosterWallCard(
             val networkBitmap = if (posterUrl.isNotBlank()) rememberPosterImage(posterUrl) else null
 
             Image(
-                bitmap = networkBitmap ?: artwork.image(media),
+                bitmap = networkBitmap ?: artwork.rememberImage(media),
                 contentDescription = media.title,
                 modifier = Modifier
                     .fillMaxSize()
-                    .graphicsLayer { alpha = coverAlpha },
+                    .then(if (coverAlpha < .999f) Modifier.graphicsLayer { alpha = coverAlpha } else Modifier),
                 contentScale = ContentScale.Crop
             )
 

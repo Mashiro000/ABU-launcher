@@ -6,6 +6,9 @@ import android.graphics.BitmapFactory
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.runtime.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 data class DemoMedia(
     val title: String,
@@ -126,7 +129,15 @@ class DemoArtwork(context: Context) {
         BitmapFactory.decodeResource(resources, resId, BitmapFactory.Options().apply { inSampleSize = 2 }).asImageBitmap()
     }
 
-    /** Android 9-12: three separable box passes on a 1/8-size immutable wallpaper. */
+    @Composable
+    fun rememberImage(media: DemoMedia): ImageBitmap {
+        val loaded by produceState(cache[media], media) {
+            if (value == null) value = withContext(Dispatchers.IO) { image(media) }
+        }
+        return loaded ?: background.asImageBitmap()
+    }
+
+    /** Android 7.1-12: three separable box passes on a 1/8-size immutable wallpaper. */
     fun blurredWallpaper(media: DemoMedia? = null): ImageBitmap {
         val cacheKey = media?.title ?: "__background__"
         blurCache[cacheKey]?.let { return it }

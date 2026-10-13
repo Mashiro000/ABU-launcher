@@ -1,5 +1,7 @@
 package com.limi.tvdesktop.player
 
+import com.limi.tvdesktop.SELECTION_TRANSITION_MS
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -118,7 +120,7 @@ private fun EpisodeListItem(
 
     val scale by animateFloatAsState(
         targetValue = if (isFocused) 1.05f else 1.0f,
-        animationSpec = tween(140),
+        animationSpec = tween(SELECTION_TRANSITION_MS),
         label = "ep_scale"
     )
 
@@ -129,7 +131,7 @@ private fun EpisodeListItem(
             isFocused -> Color(0x4DFFFFFF)
             else -> Color(0x18FFFFFF)
         },
-        animationSpec = tween(140),
+        animationSpec = tween(SELECTION_TRANSITION_MS),
         label = "ep_bg"
     )
 
@@ -139,7 +141,7 @@ private fun EpisodeListItem(
             isCurrentPlaying -> Color(0x996DA0ED)
             else -> Color.Transparent
         },
-        animationSpec = tween(140),
+        animationSpec = tween(SELECTION_TRANSITION_MS),
         label = "ep_border"
     )
 
@@ -409,7 +411,7 @@ private fun SendDanmakuButton(
 
     val scale by animateFloatAsState(
         targetValue = if (isFocused) 1.05f else 1.0f,
-        animationSpec = tween(140),
+        animationSpec = tween(SELECTION_TRANSITION_MS),
         label = "send_scale"
     )
 

@@ -2,7 +2,7 @@
 
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.4.10-purple.svg)](https://kotlinlang.org)
 [![Compose](https://img.shields.io/badge/Jetpack%20Compose-1.10.4-green.svg)](https://developer.android.com/jetpack/compose)
-[![MinSdk](https://img.shields.io/badge/minSdk-Android%209%20(API%2028)-blue.svg)](https://developer.android.com/about/versions/pie)
+[![MinSdk](https://img.shields.io/badge/minSdk-Android%207.1%20(API%2025)-blue.svg)](https://developer.android.com/about/versions/nougat)
 [![TargetSdk](https://img.shields.io/badge/targetSdk-Android%2015%20(API%2035)-orange.svg)](https://developer.android.com/about/versions/15)
 [![QQ Group](https://img.shields.io/badge/QQ%E4%BA%A4%E6%B5%81%E7%BE%A4-367281933-red.svg)](https://qm.qq.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -10,6 +10,8 @@
 **ABU Launcher（阿布桌面）** 是一款面向 Android 电视、机顶盒与掌机的原生桌面，围绕 **TV 模式、主机模式、掌机模式** 打造不同设备上的使用体验。
 
 项目基于 **Kotlin + Jetpack Compose** 原生开发，注重遥控器、手柄与触控输入，以及媒体播放、插件扩展和流畅的焦点交互。
+
+最新版本 **0.06**：[下载安装包](https://github.com/Mashiro000/ABU-launcher/releases/tag/v0.06) · [更新日志](CHANGELOG.md) · [版本说明](docs/RELEASE_NOTES_0_06.md)。
 
 > 💬 **用户与开发者官方 QQ 交流群**：**`367281933`**（欢迎加群反馈体验、交流功能建议、获取最新内测包）
 
@@ -31,8 +33,8 @@
   - 高动态焦点悬浮光晕（Focus Glow & Sweep）与平滑缩放反馈。
   - 媒体卡片展开至电影/剧集详情页的弹性流体过渡（Spring 物理动画与共享时间轴入场动效）。
 - 🌫️ **分代系毛玻璃与渐进模糊**：
-  - **Android 13+ (API 33+)**：采用硬件加速的实时渐进式毛玻璃模糊（基于 Haze 1.7.2 渲染真实背景采样与垂直渐变遮罩）。
-  - **Android 9 ~ 12 (API 28~32)**：后台线程降采样高斯模糊平滑降级，确保高中低端电视芯片均能稳定满帧运行。
+  - **Android 12+ (API 31+)**：支持硬件加速实时背景模糊；Android 13+ 的设置背景支持渐进式模糊，导航条使用均匀模糊。
+  - **Android 7.1 起**：提供后台降采样静态模糊，效果可按设备性能调整或关闭。
 - 🎬 **本地与远程媒体库支持**：
   - 支持 WebDAV / Alist / Emby / Plex 多源接入与海报墙展示。
   - 主程序默认使用 Android Media3 与系统硬件解码；MPV 作为可按需安装的官方插件，不再增大主安装包。
@@ -102,7 +104,7 @@
 
 ### 运行环境要求
 1. **JDK 17** 及以上
-2. **Android SDK 36.1**（编译使用，最低运行版本依旧为 Android 9）
+2. **Android SDK 36.1**（编译使用，最低运行版本为 Android 7.1 / API 25）
 3. 最新版 **Android Studio** (推荐 Ladybug / Meerkat 或更高版本)
 
 ### 命令行编译
@@ -118,7 +120,7 @@ cd Android
 ./gradlew.bat assembleRelease
 ```
 
-编译成功后会同时生成 `arm64-v8a`、`armeabi-v7a`、`x86_64` 与通用 APK，产物位于：
+编译成功后会同时生成 `arm64-v8a`、`armeabi-v7a`、`x86`、`x86_64` 与通用 APK，产物位于：
 - **Debug 版**：`Android/app/build/outputs/apk/debug/app-debug.apk`
 - **Release 版**：`Android/app/build/outputs/apk/release/`
 
@@ -126,7 +128,7 @@ cd Android
 
 ```bash
 adb connect <电视设备IP>:5555
-adb install -r Android/app/build/outputs/apk/release/app-release.apk
+adb install -r Android/app/build/outputs/apk/release/app-universal-release.apk
 ```
 
 ---

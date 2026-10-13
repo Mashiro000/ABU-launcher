@@ -60,8 +60,8 @@ internal fun DeveloperSettings(onBack: () -> Unit, returnRequester: FocusRequest
     }
     LaunchedEffect(Unit) { back.requestFocus() }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 40.dp)) {
-        SettingsRowItem("← 返回分类", null, back, returnRequester, onBack)
+    Column(Modifier.fillMaxSize().settingsVerticalScroll().padding(top = 20.dp, bottom = 60.dp)) {
+        SettingsRowItem("← 返回分类", null, back, returnRequester, onClick = onBack)
         Spacer(Modifier.height(20.dp))
         Text("电视开发者工具", color = White, fontSize = 34.sp)
         Info("方向键移动，确认键操作，返回键退出。测试时可回到桌面浏览，采样跨页面继续。")
@@ -162,6 +162,7 @@ private fun ReadableReport(value: String, returnRequester: FocusRequester?) {
         Text(lines.joinToString("\n"), color = Color(0xFFB9C2CF), fontSize = 18.sp,
             modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
                 .focusProperties { if (returnRequester != null) left = returnRequester }
+                .settingsAutoScroll()
                 .onFocusChanged { focused = it.isFocused }.focusable()
                 .border(1.dp, if (focused) Color.White else Color.Transparent, ContinuousCornerShape(8.dp))
                 .padding(10.dp))

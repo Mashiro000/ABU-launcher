@@ -33,7 +33,7 @@ internal fun CapsuleTextAction(
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     val keyboardControl = LocalKeyboardControl.current
-    val reveal by animateFloatAsState(if (focused || (hovered && !keyboardControl)) 1f else 0f, tween(300), label = "text-action-capsule")
+    val reveal by animateFloatAsState(if (focused || (hovered && !keyboardControl)) 1f else 0f, focusMotion(), label = "text-action-capsule")
     Box(modifier.requiredHeight(height).focusSweep(focused || (hovered && !keyboardControl)).onFocusChanged { focused = it.isFocused }
         .hoverable(interaction).clickable(interactionSource = interaction, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center) {
