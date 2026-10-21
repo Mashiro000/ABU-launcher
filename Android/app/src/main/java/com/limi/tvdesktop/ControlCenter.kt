@@ -134,7 +134,7 @@ internal fun ControlCenter(
                 alpha = reveal.value.coerceIn(0f, 1f)
             }
             .clip(shape)
-            .then(if (cachedMenuBlur) Modifier.drawBehind {
+            .then(if (LocalTransparentVideoBackdrop.current) Modifier else if (cachedMenuBlur) Modifier.drawBehind {
                 drawCoverWallpaper(staticBlur!!, IntSize(1672.dp.roundToPx(), canvasHeight.roundToPx()),
                     IntOffset(-1204.dp.roundToPx(), -104.dp.roundToPx()))
                 drawRect(Color(0xCC141414))

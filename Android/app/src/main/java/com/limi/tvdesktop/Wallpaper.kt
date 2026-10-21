@@ -229,7 +229,9 @@ internal fun VideoWallpaperSurface(uri: Uri, modifier: Modifier = Modifier, acti
 
     AndroidView(
         factory = { ctx ->
-            PlayerView(ctx).apply {
+            (android.view.LayoutInflater.from(ctx).inflate(R.layout.wallpaper_player_view, null, false) as PlayerView).apply {
+                isFocusable = false
+                descendantFocusability = android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS
                 useController = false
                 this.player = player
                 resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM

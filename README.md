@@ -13,16 +13,21 @@
 
 最新版本 **0.07**：[下载安装包](https://github.com/Mashiro000/ABU-launcher/releases/tag/v0.07) · [更新日志](CHANGELOG.md) · [版本说明](docs/RELEASE_NOTES_0_07.md)。
 
+> **安装声明**：支持直接点击 APK 安装，安装后可从应用列表点击“阿布桌面”启动；ADB 与默认桌面设置均为可选。本版签名与旧 0.06 不同，覆盖安装可能失败，卸载会清除配置，请先记录或备份。详见[安装与恢复指南](docs/ADB_INSTALL.md)。
+
 > 💬 **用户与开发者官方 QQ 交流群**：**`367281933`**（欢迎加群反馈体验、交流功能建议、获取最新内测包）
 
 ---
-本次 0.07 实际界面（模拟器截图）：
+本次 0.07 实际界面（应用宝与 Android 模拟器截图）：
 
 ![渐变桌面](docs/images/0.07/gradient-home.png)
 ![应用移动](docs/images/0.07/move-app.png)
 ![壁纸设置与渐变色卡](docs/images/0.07/gradient-picker.png)
 ![在线视频壁纸与真实预览](docs/images/0.07/video-wallpaper.png)
 ![空媒体库与添加入口](docs/images/0.07/media-library.png)
+![添加媒体库弹窗](docs/images/0.07/add-library.png)
+![视频壁纸与实时控制中心](docs/images/0.07/video-qa/realtime-control-center.png)
+![文件夹待选、完成与取消](docs/images/0.07/review/folder-staging.png)
 
 视频和预览画面来源见 [素材说明](docs/VIDEO_WALLPAPER_SOURCES.md)。
 

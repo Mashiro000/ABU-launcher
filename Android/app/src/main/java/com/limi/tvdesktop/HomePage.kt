@@ -484,6 +484,16 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
     var folderAddMode by remember { mutableStateOf<FolderAddMode?>(null) }
     val stagedFolderKeys = remember { mutableStateListOf<String>() }
     var stagingCompleting by remember { mutableStateOf(false) }
+    var stagingBounds by remember { mutableStateOf(Rect.Zero) }
+    var stagingRoot by remember { mutableStateOf(Offset.Zero) }
+    val stagingFlights = remember { mutableStateListOf<Pair<DockApp, Rect>>() }
+    fun stageApp(app: DockApp, bounds: Rect) {
+        val key = appKey(app)
+        if (key !in stagedFolderKeys && key !in (folderAddMode?.target?.members ?: emptyList())) {
+            stagingFlights.add(app to bounds)
+            stagedFolderKeys.add(key)
+        }
+    }
     var pendingPinApp by remember { mutableStateOf<DockApp?>(null) }
     var pinMode by remember { mutableStateOf<String?>(null) }
     var pinFirstEntry by remember { mutableStateOf("") }
@@ -665,7 +675,6 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                 val remaining = folder.members.filterNot(stagedFolderKeys::contains)
                 when {
                     remaining.isEmpty() -> null
-                    remaining.size == 1 && folder.members.size > 1 -> null
                     else -> folder.copy(members = remaining)
                 }
             }
@@ -1026,7 +1035,7 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                 folderToOpen = OpenFolderRequest(folder, focusedBounds, picking = true)
             } else if (folder == null) {
                 val key = appKey(app)
-                if (key !in adding.target.members && key !in stagedFolderKeys) stagedFolderKeys.add(key)
+                stageApp(app, bounds ?: focusedBounds)
             }
             return
         }
@@ -1074,7 +1083,7 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
     val dockInitialY = (canvasHeight - dockHeight - 40.dp).coerceAtLeast(40.dp)
     val dockTravel = dockInitialY - dockTargetY
 
-    Box(Modifier.fillMaxSize().zIndex(1f)) {
+    Box(Modifier.fillMaxSize().zIndex(1f).onGloballyPositioned { stagingRoot = it.positionInRoot() }) {
     Box(Modifier.fillMaxSize()) {
 
         if (editOrderKeys != null || dockPlacementKey != null) {
@@ -1130,6 +1139,7 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
             ) {
                 when (dockStyle) {
                     DesktopPreferences.DockStyle.GLASS -> {
+                        if (!LocalTransparentVideoBackdrop.current) {
                         if (staticBlur == null && RenderPerformance.blur31) {
                             Box(
                                 Modifier.fillMaxSize()
@@ -1146,6 +1156,7 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                             }
                         }
                         Box(Modifier.fillMaxSize().background(currentDockTint))
+                        }
                     }
                     DesktopPreferences.DockStyle.FLOATING -> {
                         // Floating dock: completely transparent background
@@ -1549,24 +1560,6 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
             )
         }
 
-        folderAddMode?.let { mode ->
-            val stagedApps = stagedFolderKeys.mapNotNull { key -> apps.firstOrNull { appKey(it) == key } }
-            FolderStagingTray(
-                apps = stagedApps,
-                target = mode.targetBounds.center,
-                completing = stagingCompleting,
-                focusRequester = stagingFocusRequester,
-                onComplete = { stagingCompleting = true },
-                onAnimationFinished = {
-                    AppHomeFeatures.moveIntoFolder(context, mode.target.id, stagedFolderKeys.toList())
-                    stagedFolderKeys.clear()
-                    stagingCompleting = false
-                    folderAddMode = null
-                    featureRevision++
-                },
-                modifier = Modifier.align(Alignment.CenterEnd).padding(end = 30.dp).zIndex(950f)
-            )
-        }
 
         activeFolderMenu?.let { request ->
             FolderContextMenu(
@@ -1809,10 +1802,14 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                     stagedFolderKeys.clear()
                     folderAddMode = FolderAddMode(request.folder, request.bounds)
                 },
-            onPick = { selected ->
-                    val key = appKey(selected)
-                    if (key !in stagedFolderKeys) stagedFolderKeys.add(key)
-                },
+            onPick = { selected, bounds ->
+                stageApp(selected, bounds)
+                if (folderToOpen?.folder?.members?.all { it in stagedFolderKeys } == true) {
+                    folderToOpen = null
+                    scope.launch { withFrameNanos { }; runCatching { stagingFocusRequester.requestFocus() } }
+                }
+            },
+            stagingFocusRequester = stagingFocusRequester,
             onLaunch = { selected ->
                     if (DesktopPreferences.FolderLaunchBehavior.current(context) ==
                         DesktopPreferences.FolderLaunchBehavior.CLOSE) {
@@ -1829,6 +1826,32 @@ private fun renderBanner(drawable: Drawable, targetWidth: Int = 512, targetHeigh
                     }
                 }
         )
+        folderAddMode?.let { mode ->
+            val stagedApps = stagedFolderKeys.mapNotNull { key -> apps.firstOrNull { appKey(it) == key } }
+            FolderStagingTray(
+                apps = stagedApps,
+                target = mode.targetBounds.center,
+                completing = stagingCompleting,
+                focusRequester = stagingFocusRequester,
+                onComplete = { folderToOpen = null; stagingCompleting = true },
+                onCancel = { folderToOpen = null; stagedFolderKeys.clear(); stagingFlights.clear(); stagingCompleting = false; folderAddMode = null },
+                onAnimationFinished = {
+                    AppHomeFeatures.moveIntoFolder(context, mode.target.id, stagedFolderKeys.toList())
+                    stagedFolderKeys.clear()
+                    stagingCompleting = false
+                    folderAddMode = null
+                    featureRevision++
+                },
+                modifier = Modifier.align(Alignment.CenterEnd).padding(end = 30.dp).zIndex(950f)
+                    .onGloballyPositioned { stagingBounds = it.boundsInRoot() }
+            )
+        }
+
+        stagingFlights.toList().forEach { flight ->
+            key(appKey(flight.first)) {
+                FolderStagingFlight(flight.first, flight.second, stagingBounds, stagingRoot) { stagingFlights.remove(flight) }
+            }
+        }
         pinMode?.let { mode ->
             PinEntryDialog(mode = mode, haze = menuHaze, staticBlur = staticBlur, onDismiss = { pinMode = null; pendingPinApp = null; pendingLaunchBounds = null }, onSubmit = { value ->
                 val app = pendingPinApp
@@ -2245,7 +2268,7 @@ private fun AppContextMenu(
                         drawCoverWallpaper(staticBlur, IntSize(maxWidthPx, maxHeightPx), IntOffset(-x, -y))
                     }
                 }
-                .then(if (RenderPerformance.blur31) Modifier.hazeEffect(wallpaperHaze) {
+                .then(if (LocalTransparentVideoBackdrop.current) Modifier else if (RenderPerformance.blur31) Modifier.hazeEffect(wallpaperHaze) {
                     blurRadius = 40.dp
                     noiseFactor = 0f
                     backgroundColor = Color(0xFF141414)
@@ -2697,7 +2720,8 @@ private fun FolderMorphHost(
     onClosing: (OpenFolderRequest) -> Unit,
     onDismiss: (OpenFolderRequest) -> Unit,
     onAdd: (OpenFolderRequest) -> Unit,
-    onPick: (DockApp) -> Unit,
+    onPick: (DockApp, Rect) -> Unit,
+    stagingFocusRequester: FocusRequester,
     onLaunch: (DockApp) -> Unit
 ) {
     val view = LocalView.current
@@ -2732,6 +2756,7 @@ private fun FolderMorphHost(
                         onDismiss = onDismiss,
                         onAdd = onAdd,
                         onPick = onPick,
+                        stagingFocusRequester = stagingFocusRequester,
                         onLaunch = onLaunch,
                         registerClose = { closeActive = it }
                     )
@@ -2757,7 +2782,8 @@ private fun FolderMorphPanel(
     onClosing: (OpenFolderRequest) -> Unit,
     onDismiss: (OpenFolderRequest) -> Unit,
     onAdd: (OpenFolderRequest) -> Unit,
-    onPick: (DockApp) -> Unit,
+    onPick: (DockApp, Rect) -> Unit,
+    stagingFocusRequester: FocusRequester,
     onLaunch: (DockApp) -> Unit,
     registerClose: (() -> Unit) -> Unit
 ) {
@@ -2785,7 +2811,9 @@ private fun FolderMorphPanel(
         DesktopPreferences.FolderLaunchBehavior.current(context)
     }
     val indicatorStyle = remember(DesktopPreferences.version) { DesktopPreferences.FolderPageIndicator.current(context) }
-    val panelTint = remember(wallpaperImage) {
+    val videoTransparent = LocalTransparentVideoBackdrop.current
+    val panelTint = remember(wallpaperImage, videoTransparent) {
+        if (videoTransparent) return@remember Color.Transparent
         val imageIsLight = wallpaperImage?.asAndroidBitmap()?.let(::sampledBitmapLuminance)?.let { it > .42f }
         val systemIsLight = if (Build.VERSION.SDK_INT >= 27) runCatching {
             val color = android.app.WallpaperManager.getInstance(context)
@@ -2835,7 +2863,7 @@ private fun FolderMorphPanel(
     BoxWithConstraints(Modifier.fillMaxSize()
         .zIndex(if (request != null) 100f else 0f)
         .graphicsLayer { alpha = if (coveredByOpenFolder) 0f else 1f }
-        .focusProperties { onExit = { if (request != null && !closing) cancelFocusChange() } }
+        .focusProperties { onExit = { if (request != null && !closing && !picking) cancelFocusChange() } }
         .focusGroup()) {
         val density = LocalDensity.current
         // Both directions use the selected visual bounds. The base layout bounds are smaller
@@ -2925,7 +2953,7 @@ private fun FolderMorphPanel(
                 val canFocusCell = request != null && !closing
                 val activateCell = {
                     if (isAdd) close(onAdd)
-                    else if (app != null && picking) onPick(app)
+                    else if (app != null && picking) onPick(app, cellBounds)
                     else if (app != null && launchBehavior == DesktopPreferences.FolderLaunchBehavior.KEEP_OPEN) onLaunch(app)
                     else if (app != null) close { onLaunch(app) }
                 }
@@ -2938,7 +2966,10 @@ private fun FolderMorphPanel(
                         scaleX = zoom; scaleY = zoom
                     }
                     .focusRequester(cellFocus[cell])
-                    .focusProperties { canFocus = canFocusCell }
+                    .focusProperties {
+                        canFocus = canFocusCell
+                        if (picking) right = stagingFocusRequester
+                    }
                     .onFocusChanged { focused = it.isFocused }
                     .onPreviewKeyEvent { event ->
                         if (event.type == KeyEventType.KeyDown && event.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_MENU &&
@@ -2994,12 +3025,35 @@ private fun FolderPageIndicator(page: Int, count: Int, style: DesktopPreferences
 }
 
 @Composable
+private fun FolderStagingFlight(app: DockApp, source: Rect, target: Rect, root: Offset, onFinished: () -> Unit) {
+    val progress = remember { Animatable(0f) }
+    val density = LocalDensity.current
+    LaunchedEffect(Unit) {
+        progress.animateTo(1f, tween(RenderPerformance.duration(300), easing = PageTransitionEasing))
+        onFinished()
+    }
+    val p = progress.value
+    val start = source.center - root
+    val end = Offset(target.center.x, target.top + with(density) { 48.dp.toPx() }) - root
+    val width = with(density) { source.width.toDp() }.coerceAtLeast(62.dp)
+    val height = with(density) { source.height.toDp() }.coerceAtLeast(62.dp)
+    FolderAppVisual(app, Modifier.zIndex(1000f)
+        .offset { IntOffset((start.x + (end.x - start.x) * p - with(density) { width.toPx() } / 2).roundToInt(),
+            (start.y + (end.y - start.y) * p - with(density) { height.toPx() } / 2).roundToInt()) }
+        .size(width, height).graphicsLayer {
+            scaleX = 1f + (62.dp.toPx() / width.toPx() - 1f) * p
+            scaleY = 1f + (62.dp.toPx() / height.toPx() - 1f) * p
+        })
+}
+
+@Composable
 private fun FolderStagingTray(
     apps: List<DockApp>,
     target: Offset,
     completing: Boolean,
     focusRequester: FocusRequester,
     onComplete: () -> Unit,
+    onCancel: () -> Unit,
     onAnimationFinished: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -3042,15 +3096,16 @@ private fun FolderStagingTray(
         }
         val interaction = remember { MutableInteractionSource() }
         var doneFocused by remember { mutableStateOf(false) }
+        Text("待选 · ${apps.size}", color = Color.White, fontSize = 14.sp)
         Text("完成", color = if (apps.isNotEmpty()) Color.White else Color.White.copy(alpha = .35f), fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.clip(RoundedCornerShape(13.dp))
                 .background(if (doneFocused) Color(0xFF568DB1) else Color(0xFF313A44))
                 .focusRequester(focusRequester)
                 .hoverable(interaction, apps.isNotEmpty()).onFocusChanged { doneFocused = it.isFocused }
-                .focusable(apps.isNotEmpty())
                 .clickable(interactionSource = interaction, indication = null, enabled = apps.isNotEmpty() && !completing, onClick = onComplete)
                 .padding(horizontal = 16.dp, vertical = 9.dp))
+        HomeDialogAction("取消", onClick = onCancel, enabled = !completing)
     }
 }
 

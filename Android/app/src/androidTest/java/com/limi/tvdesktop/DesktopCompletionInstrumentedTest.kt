@@ -24,6 +24,9 @@ class DesktopCompletionInstrumentedTest {
         compose.activityRule.scenario.onActivity { activity ->
             RenderPerformance.init(activity)
             NavigationPreferences.reset(activity)
+            androidx.test.platform.app.InstrumentationRegistry.getArguments().getString("previewBaseUrl")?.let {
+                activity.getSharedPreferences("desktop", 0).edit().putString("videoPreviewBaseUrl", it).commit()
+            }
             AccountManager.init(activity)
             PosterCacheManager.init(activity)
             MediaLibraryManager.init(activity)
@@ -44,14 +47,18 @@ class DesktopCompletionInstrumentedTest {
         File(directory, "$name.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
     }
 
+    @OptIn(ExperimentalTestApi::class)
     @Test fun emptyLibraryOpensAddDialogDirectlyAndCanReturn() {
         compose.onNodeWithText("媒体库").performClick()
-        compose.onNodeWithText("添加媒体库").assertIsDisplayed()
+        compose.onNodeWithText("媒体库").performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.RequestFocus) { it() }
+        compose.onNodeWithText("媒体库").performKeyInput { pressKey(Key.DirectionDown) }
+        compose.onNodeWithText("添加媒体库").assertIsFocused().assertIsDisplayed()
         screenshot("media-library")
-        compose.onNodeWithText("添加媒体库").performClick()
+        compose.onNodeWithText("添加媒体库").performKeyInput { pressKey(Key.Enter) }
+        compose.onNodeWithText("服务器地址").assertIsDisplayed()
         screenshot("add-library")
-        compose.onNodeWithText("← 返回").assertIsDisplayed().performClick()
-        compose.onNodeWithText("添加媒体库").assertIsDisplayed()
+        compose.onNodeWithText("取消").performClick()
+        compose.onNodeWithText("添加媒体库").assertIsFocused().assertIsDisplayed()
         compose.onNodeWithText("海岸线之外").assertDoesNotExist()
     }
 

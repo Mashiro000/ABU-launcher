@@ -16,12 +16,18 @@ import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Rule
+import org.junit.Before
 import org.junit.Test
 import java.io.File
 
 class WallpaperSourceInstrumentedTest {
     @get:Rule val compose = createComposeRule()
     private val context get() = ApplicationProvider.getApplicationContext<Context>()
+    @Before fun configurePreview() {
+        androidx.test.platform.app.InstrumentationRegistry.getArguments().getString("previewBaseUrl")?.let {
+            context.getSharedPreferences("desktop", 0).edit().putString("videoPreviewBaseUrl", it).commit()
+        }
+    }
     private fun capture(name: String) {
         val folder = File(context.cacheDir, "abu-qa").apply { mkdirs() }
         File(folder, "$name.png").outputStream().use {
@@ -69,6 +75,23 @@ class WallpaperSourceInstrumentedTest {
                 frame?.recycle()
             } finally { retriever.release() }
         } finally { output.delete() }
+    }
+    @Test fun catalogCanFilterAndPageWithoutLoadingAllCards() {
+        compose.setContent { androidx.compose.foundation.layout.Column(Modifier.fillMaxSize().settingsVerticalScroll()) { OnlineVideoWallpapers {} } }
+        compose.onNodeWithText("全部 · 114 部 · 第 1 / 15 页").assertExists()
+        compose.onNodeWithText("下一页").performScrollTo().performClick()
+        compose.onNodeWithText("全部 · 114 部 · 第 2 / 15 页").assertExists()
+        compose.onNodeWithContentDescription("筛选海底视频").performScrollTo().performClick()
+        compose.onNodeWithText("海底 · 21 部 · 第 1 / 3 页").assertExists()
+        compose.onNodeWithContentDescription("筛选城市视频").performScrollTo().performClick()
+        compose.onNodeWithText("城市 · 30 部 · 第 1 / 4 页").assertExists()
+    }
+    @Test fun completeCatalogHasAllCategoriesAndNetworkOnlyPreviews() {
+        val entries = VideoWallpaperCatalog.entries(context)
+        assertEquals(114, entries.size)
+        assertEquals(114, entries.map { it.id }.distinct().size)
+        assertEquals(setOf("海底", "自然", "太空", "城市"), entries.map { it.category }.toSet())
+        assertTrue(entries.all { it.url.startsWith("https://sylvan.apple.com/Videos/") })
     }
     @Test fun lockingSkipsDailyNetworkAndUnlockResetsTheCheckDay() = runBlocking {
         val prefs = context.getSharedPreferences("desktop", 0)

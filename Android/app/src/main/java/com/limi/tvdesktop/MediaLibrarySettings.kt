@@ -500,7 +500,7 @@ private fun TvOptionChip(
     val focused by interaction.collectIsFocusedAsState()
 
     Box(
-        modifier = Modifier
+        modifier = Modifier.fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(
                 if (focused) Color.White
@@ -515,7 +515,7 @@ private fun TvOptionChip(
         Text(
             text,
             color = if (focused) Color.Black else Color.White,
-            fontSize = 16.sp,
+            fontSize = 20.sp,
             fontWeight = if (isSelected || focused) FontWeight.Bold else FontWeight.Normal
         )
     }
@@ -549,7 +549,7 @@ private fun TvButton(
         Text(
             text,
             color = if (focused) Color.Black else Color.White,
-            fontSize = 16.sp,
+            fontSize = 20.sp,
             fontWeight = FontWeight.SemiBold
         )
     }
@@ -559,7 +559,8 @@ private fun TvButton(
 internal fun AddServerDialog(
     initialAccount: MediaAccount?,
     onDismiss: () -> Unit,
-    onSaved: (MediaAccount) -> Unit
+    onSaved: (MediaAccount) -> Unit,
+    standalone: Boolean = false
 ) {
     var selectedType by remember { mutableStateOf(initialAccount?.type ?: ServerType.EMBY) }
     var name by remember { mutableStateOf(initialAccount?.name.orEmpty()) }
@@ -567,182 +568,97 @@ internal fun AddServerDialog(
     var username by remember { mutableStateOf(initialAccount?.username.orEmpty()) }
     var password by remember { mutableStateOf("") }
     var token by remember { mutableStateOf(initialAccount?.token.orEmpty()) }
-    var ignoreSsl by remember { mutableStateOf(initialAccount?.ignoreSslErrors ?: true) }
-    var testStatus by remember { mutableStateOf<String?>(null) }
-    var testing by remember { mutableStateOf(false) }
-
+    var ignoreSsl by remember { mutableStateOf(initialAccount?.ignoreSslErrors ?: false) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-
-    val screenHeight = LocalConfiguration.current.screenHeightDp.dp
-    SettingsInlinePage(onDismiss) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-
-                .widthIn(max = 680.dp)
-                .heightIn(max = screenHeight * 0.9f)
-                .clip(ContinuousCornerShape(24.dp))
-                .background(Color(0xFF1A1D24))
-
-                .padding(24.dp)
-        ) {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text(
-                    if (initialAccount == null) "添加媒体服务器" else "编辑媒体服务器",
-                    color = White,
-                    fontSize = 26.sp,
-                    fontWeight = FontWeight.Bold
-                )
-
-                Spacer(Modifier.height(20.dp))
-
-                // Protocol selector
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    ServerType.entries.forEach { type ->
-                        TvOptionChip(
-                            text = type.displayName,
-                            isSelected = selectedType == type,
-                            onClick = {
-                                selectedType = type
-                                name = ""
-                                host = ""
-                            }
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(20.dp))
-
-                TvInputField(label = "名称", placeholder = "例如：客厅 Emby", value = name, onValueChange = { name = it })
-                Spacer(Modifier.height(12.dp))
-                val addressHint = when (selectedType) {
-                    ServerType.EMBY, ServerType.JELLYFIN -> "例如：http://192.168.1.100:8096"
-                    ServerType.PLEX -> "例如：http://192.168.1.100:32400"
-                    ServerType.WEBDAV_ALIST -> "例如：http://192.168.1.100:5244"
-                }
-                TvInputField(label = "服务器地址 (URL)", placeholder = addressHint, value = host, onValueChange = { host = it })
-                Spacer(Modifier.height(12.dp))
-
-                if (selectedType == ServerType.PLEX) {
-                    TvInputField(label = "X-Plex-Token", placeholder = "输入 Plex 访问令牌", value = token, onValueChange = { token = it })
-                } else if (selectedType == ServerType.WEBDAV_ALIST) {
-                    TvInputField(label = "Alist Token（可留空）", placeholder = "输入 Alist 令牌", value = token, onValueChange = { token = it })
-                } else {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        Box(Modifier.weight(1f)) {
-                            TvInputField(label = "用户名", placeholder = "输入用户名", value = username, onValueChange = { username = it })
-                        }
-                        Box(Modifier.weight(1f)) {
-                            TvInputField(label = "密码", placeholder = "输入密码", value = password, isPassword = true, onValueChange = { password = it })
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(16.dp))
-
-                // SSL bypass checkbox
-                Row(
-                    modifier = Modifier.clickable { ignoreSsl = !ignoreSsl },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(if (ignoreSsl) "☑" else "☐", color = Color(0xFF3875F6), fontSize = 20.sp)
-                    Spacer(Modifier.width(8.dp))
-                    Text("忽略 SSL 自签名证书校验 (内网 HTTPS 推荐开启)", color = Color(0xFFA5ACB8), fontSize = 14.sp)
-                }
-
-                testStatus?.let { status ->
-                    Spacer(Modifier.height(12.dp))
-                    Text(
-                        status,
-                        color = if (status.startsWith("成功")) Color(0xFF22C55E) else Color(0xFFEF4444),
-                        fontSize = 15.sp
-                    )
-                }
-
-                Spacer(Modifier.height(28.dp))
-
-                // Action Buttons
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    TvButton(text = "取消", onClick = onDismiss)
-                    Spacer(Modifier.width(12.dp))
-
-                    TvButton(
-                        text = if (testing) "测试中..." else "测试连接",
-                        onClick = {
-                            if (name.isBlank() || host.isBlank()) {
-                                testStatus = "请填写服务器名称和地址"
-                                return@TvButton
-                            }
-                            if (!AccountManager.allowInsecureConnections.value && host.trim().startsWith("http://", true)) {
-                                testStatus = "失败: 当前禁止 HTTP，请改用 HTTPS 或在媒体库设置中允许"
-                                return@TvButton
-                            }
-                            testing = true
-                            testStatus = null
-                            scope.launch {
-                                val tempAcc = MediaAccount(
-                                    name = name,
-                                    type = selectedType,
-                                    serverUrl = host,
-                                    username = username,
-                                    token = token,
-                                    ignoreSslErrors = ignoreSsl
-                                )
-                                val provider = providerFor(tempAcc)
-                                val res = provider.testConnection()
-                                withContext(Dispatchers.Main) {
-                                    testing = false
-                                    testStatus = if (res.isSuccess) "成功: ${res.getOrNull()}" else "失败: ${res.exceptionOrNull()?.message}"
-                                }
-                            }
-                        }
-                    )
-
-                    Spacer(Modifier.width(12.dp))
-
-                    TvButton(
-                        text = "保存并启用",
-                        isPrimary = true,
-                        onClick = {
-                            if (name.isBlank() || host.isBlank()) {
-                                testStatus = "请填写服务器名称和地址"
-                                return@TvButton
-                            }
-                            if (!AccountManager.allowInsecureConnections.value && host.trim().startsWith("http://", true)) {
-                                testStatus = "失败: 当前禁止 HTTP，请改用 HTTPS 或在媒体库设置中允许"
-                                return@TvButton
-                            }
-                            scope.launch {
-                                var finalAcc = MediaAccount(
-                                    id = initialAccount?.id ?: java.util.UUID.randomUUID().toString(),
-                                    name = name,
-                                    type = selectedType,
-                                    serverUrl = host,
-                                    username = username,
-                                    token = token,
-                                    userId = initialAccount?.userId.orEmpty(),
-                                    enabled = initialAccount?.enabled ?: true,
-                                    includeInAggregate = initialAccount?.includeInAggregate ?: true,
-                                    ignoreSslErrors = ignoreSsl
-                                )
-                                if ((selectedType == ServerType.EMBY || selectedType == ServerType.JELLYFIN) && password.isNotBlank()) {
-                                    val p = EmbyProvider(finalAcc)
-                                    val authRes = p.authenticate(password)
-                                    if (authRes.isSuccess) {
-                                        finalAcc = authRes.getOrThrow()
-                                    }
-                                }
-                                onSaved(finalAcc)
-                            }
-                        }
-                    )
-                }
-            }
+    val close = remember { FocusRequester() }
+    if (standalone) {
+        BackHandler { onDismiss() }
+        LaunchedEffect(Unit) { withFrameNanos { }; close.requestFocus() }
+    }
+    suspend fun account(): MediaAccount {
+        val address = host.trim().trimEnd('/')
+        val parsed = android.net.Uri.parse(address)
+        require(parsed.scheme in listOf("http", "https") && !parsed.host.isNullOrBlank()) { "请输入完整服务器地址，例如 http://192.168.1.100:8096" }
+        require(AccountManager.allowInsecureConnections.value || parsed.scheme != "http") { "当前禁止 HTTP，请使用 HTTPS 或调整媒体库连接设置" }
+        var result = MediaAccount(
+            id = initialAccount?.id ?: java.util.UUID.randomUUID().toString(),
+            name = name.trim().ifBlank { selectedType.displayName }, type = selectedType, serverUrl = address,
+            username = username.trim(), token = token.trim(), userId = initialAccount?.userId.orEmpty(),
+            enabled = initialAccount?.enabled ?: true, includeInAggregate = initialAccount?.includeInAggregate ?: true,
+            ignoreSslErrors = ignoreSsl)
+        if (selectedType in listOf(ServerType.EMBY, ServerType.JELLYFIN) && password.isNotBlank()) {
+            result = EmbyProvider(result).authenticate(password).getOrThrow()
+        }
+        return result
+    }
+    fun submit(save: Boolean) {
+        if (busy) return
+        busy = true; status = null
+        scope.launch {
+            try {
+                val value = account()
+                if (save) onSaved(value)
+                else status = "连接成功 · ${providerFor(value).testConnection().getOrThrow()}"
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) { status = e.message ?: "连接失败，请检查地址和凭据" }
+            finally { busy = false }
         }
     }
+    val form: @Composable ColumnScope.() -> Unit = {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(if (initialAccount == null) "添加媒体库" else "编辑媒体库", color = White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
+                Text("连接你的服务器，电影与剧集将在这里汇集", color = Muted, fontSize = 17.sp, modifier = Modifier.padding(top = 6.dp))
+            }
+            if (standalone) TvButton("取消", focusRequester = close, onClick = onDismiss)
+        }
+        Spacer(Modifier.height(24.dp))
+        Text("服务器类型", color = Muted, fontSize = 18.sp)
+        Spacer(Modifier.height(10.dp))
+        ServerType.entries.chunked(if (standalone) 4 else 2).forEach { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                row.forEach { type ->
+                    Box(Modifier.weight(1f)) { TvOptionChip(type.displayName, selectedType == type) { selectedType = type; status = null } }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+        Spacer(Modifier.height(12.dp))
+        TvInputField("服务器地址", when (selectedType) {
+            ServerType.PLEX -> "http://192.168.1.100:32400"
+            ServerType.WEBDAV_ALIST -> "http://192.168.1.100:5244"
+            else -> "http://192.168.1.100:8096"
+        }, host, { host = it })
+        Spacer(Modifier.height(18.dp))
+        if (selectedType in listOf(ServerType.EMBY, ServerType.JELLYFIN)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                Box(Modifier.weight(1f)) { TvInputField("用户名", "服务器账号", username, { username = it }) }
+                Box(Modifier.weight(1f)) { TvInputField("密码", "输入密码", password, { password = it }, isPassword = true) }
+            }
+        } else TvInputField(if (selectedType == ServerType.PLEX) "Plex 访问令牌" else "Alist 令牌（可选）", "Token", token, { token = it }, isPassword = true)
+        Spacer(Modifier.height(18.dp))
+        TvInputField("媒体库名称（可选）", "默认使用 ${selectedType.displayName}", name, { name = it })
+        Spacer(Modifier.height(18.dp))
+        SettingsRowItem("允许自签名证书", if (ignoreSsl) "已开启" else "已关闭") { ignoreSsl = !ignoreSsl }
+        status?.let { Text(it, color = if (it.startsWith("连接成功")) Color(0xFF71D9AD) else Color(0xFFFFA6A0), fontSize = 18.sp, modifier = Modifier.padding(top = 14.dp)) }
+        Spacer(Modifier.height(24.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            TvButton(if (busy) "正在连接…" else "测试连接", onClick = { submit(false) })
+            TvButton(if (busy) "请稍候…" else "保存并连接", isPrimary = true, onClick = { submit(true) })
+        }
+        Spacer(Modifier.height(12.dp))
+    }
+    if (standalone) {
+        BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .42f)), contentAlignment = Alignment.Center) {
+            Column(Modifier.widthIn(max = 1000.dp).fillMaxWidth().heightIn(max = maxHeight - 64.dp)
+                .clip(ContinuousCornerShape(28.dp)).background(Color(0xFF1A202B))
+                .border(1.dp, Color(0x33FFFFFF), ContinuousCornerShape(28.dp))
+                .focusProperties { onExit = { cancelFocusChange() } }.focusGroup()
+                .settingsVerticalScroll().padding(32.dp), content = form)
+        }
+    } else SettingsInlinePage(onDismiss, form)
 }
 
 @Composable
@@ -885,24 +801,24 @@ private fun TvInputField(
     val focused by interaction.collectIsFocusedAsState()
 
     Column {
-        Text(label, color = Color(0xFFA5ACB8), fontSize = 13.sp, modifier = Modifier.padding(bottom = 6.dp))
+        Text(label, color = Color(0xFFA5ACB8), fontSize = 18.sp, modifier = Modifier.padding(bottom = 6.dp))
         BasicTextField(
             value = value,
             onValueChange = onValueChange,
             singleLine = true,
             visualTransformation = if (isPassword) PasswordVisualTransformation() else VisualTransformation.None,
-            textStyle = TextStyle(color = if (focused) Color.Black else Color.White, fontSize = 16.sp),
+            textStyle = TextStyle(color = if (focused) Color.Black else Color.White, fontSize = 21.sp),
             cursorBrush = SolidColor(if (focused) Color.Black else Color.White),
             interactionSource = interaction,
             modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
+                .fillMaxWidth().settingsAutoScroll()
+                .clip(RoundedCornerShape(14.dp))
                 .background(if (focused) Color.White else Color(0x26FFFFFF))
                 .border(1.dp, if (focused) Color(0xFF141414) else Color(0x33FFFFFF), RoundedCornerShape(10.dp))
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             decorationBox = { innerTextField ->
                 Box {
-                    if (value.isEmpty()) Text(placeholder, color = if (focused) Color(0xFF707782) else Color(0xFF9AA1AD), fontSize = 16.sp)
+                    if (value.isEmpty()) Text(placeholder, color = if (focused) Color(0xFF707782) else Color(0xFF9AA1AD), fontSize = 20.sp)
                     innerTextField()
                 }
             }

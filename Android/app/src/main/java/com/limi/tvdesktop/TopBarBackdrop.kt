@@ -18,6 +18,7 @@ import dev.chrisbanes.haze.*
 @OptIn(ExperimentalHazeApi::class)
 @Composable
 internal fun TopBarBackdrop(source: HazeState, reveal: () -> Float) {
+    if (LocalTransparentVideoBackdrop.current) return
     val view = LocalView.current
     val context = LocalContext.current
     val tuningVersion = DesktopPreferences.version

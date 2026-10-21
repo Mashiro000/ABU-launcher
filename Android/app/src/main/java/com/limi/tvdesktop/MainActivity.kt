@@ -440,6 +440,10 @@ fun TvDesktop() {
     val appListBlurEnabled = remember(glassPrefVersion) { DesktopPreferences.GlassTuning.appListBlurEnabled(context) }
     val appListOpacity = remember(glassPrefVersion) { DesktopPreferences.GlassTuning.appListOpacity(context) }
     val wallpaperMode = remember(wallpaperVersion) { WallpaperMode.current(context) }
+    val videoWallpaperUri = remember(wallpaperVersion, wallpaperMode) {
+        if (wallpaperMode == WallpaperMode.VIDEO) VideoWallpaperPrefs.current(context) else null
+    }
+    val transparentVideoBackdrop = useTransparentVideoBackdrop(wallpaperMode, page == "首页", videoWallpaperUri != null, activeDockBackdrop != null, RenderPerformance.blur31)
     val bingRevision = BingWallpaper.revision
     LaunchedEffect(wallpaperMode) {
         if (wallpaperMode == WallpaperMode.BING) while (true) {
@@ -458,14 +462,15 @@ fun TvDesktop() {
         }
     }
     val fixedWallpaper = loadedWallpaper
-    var legacyBlur by remember { mutableStateOf<ImageBitmap?>(null) }
+    var cachedLegacyBlur by remember { mutableStateOf<ImageBitmap?>(null) }
+    val legacyBlur = if (transparentVideoBackdrop) null else cachedLegacyBlur
     val cachedHomeBackdrop = page == "首页" && wallpaperMode != WallpaperMode.VIDEO &&
         RenderPerformance.blurMode != RenderPerformance.BlurMode.NONE
     val cachedHomeBlur = cachedHomeBackdrop && appListBlurEnabled && appListBlur > 0f
     val cacheQuickMenuBackdrop = (settings || modePicker || signalPicker) &&
         RenderPerformance.blurMode != RenderPerformance.BlurMode.NONE && (page != "首页" || wallpaperMode != WallpaperMode.VIDEO)
-    LaunchedEffect(artwork, banner, page, wallpaperMode, fixedWallpaper, activeDockBackdrop, RenderPerformance.staticBlur, cachedHomeBackdrop, cacheQuickMenuBackdrop) {
-        legacyBlur = if (RenderPerformance.staticBlur || cachedHomeBackdrop || cacheQuickMenuBackdrop) withContext(Dispatchers.Default) {
+    LaunchedEffect(artwork, banner, page, wallpaperMode, fixedWallpaper, activeDockBackdrop, RenderPerformance.staticBlur, cachedHomeBackdrop, cacheQuickMenuBackdrop, transparentVideoBackdrop) {
+        cachedLegacyBlur = if (!transparentVideoBackdrop && (RenderPerformance.staticBlur || cachedHomeBackdrop || cacheQuickMenuBackdrop)) withContext(Dispatchers.Default) {
             when {
                 activeDockBackdrop != null -> artwork.blurredBitmap(activeDockBackdrop.asAndroidBitmap(), "dock:${dockSelected?.imageUri}")
                 page == "媒体库" || (page == "首页" && wallpaperMode == WallpaperMode.FOLLOW_CONTENT) -> {
@@ -575,7 +580,7 @@ fun TvDesktop() {
         val physical = LocalDensity.current
         val scale = with(physical) { maxWidth.toPx() } / 1672f
         val canvasHeight = (with(physical) { maxHeight.toPx() } / scale).dp
-        CompositionLocalProvider(LocalDensity provides Density(scale, 1f), LocalCanvasHeight provides canvasHeight, LocalKeyboardControl provides keyboardControl) {
+        CompositionLocalProvider(LocalDensity provides Density(scale, 1f), LocalCanvasHeight provides canvasHeight, LocalKeyboardControl provides keyboardControl, LocalTransparentVideoBackdrop provides transparentVideoBackdrop) {
             // 我的媒体 现在是单行横向货架：行高取最高卡片，行中心 = 96 顶距 + 标题 36 + titleGap 38 + 货架上下 24 + 半高
             val categoryRowHeight = remember(categoryList, artwork) {
                 categoryList.map { categoryCardSize(categoryCardRatio(it, artwork)).second.value }.maxOrNull() ?: 198f
@@ -615,7 +620,7 @@ fun TvDesktop() {
             }
             // 页面级浮层独占方向键：控制中心、设置页、搜索、详情页、海报墙打开时，
             // 媒体库的行导航不能吞掉 Up/Down，否则浮层里的选择无法用遥控器/键盘/手柄切换。
-            val rowNavigationEnabled = page == "媒体库" && selected == null &&
+            val rowNavigationEnabled = page == "媒体库" && hasAccounts && MediaLibraryManager.hasData && selected == null &&
                 posterWallCategory == null && !settings && !modePicker && !signalPicker && !settingsPage && !search && !addingMediaLibrary
             FocusRowsHost(list, dynamicFocusRows, rowNavigationEnabled, onDirection = { keyboardControl = true }) {
             val progress = {
@@ -650,16 +655,14 @@ fun TvDesktop() {
                 } else false
             }) {
                 Box(Modifier.fillMaxSize()
-                    .then(if (RenderPerformance.blur31) Modifier.hazeSource(haze) else Modifier)) {
-                    val videoUri = remember(wallpaperVersion, wallpaperMode) {
-                        if (wallpaperMode == WallpaperMode.VIDEO) VideoWallpaperPrefs.current(context) else null
-                    }
+                    .then(if (!transparentVideoBackdrop && RenderPerformance.blur31) Modifier.hazeSource(haze) else Modifier)) {
+                    val videoUri = videoWallpaperUri
                     val currentBlurProgress = { if (page == "媒体库") progress() else if (page == "首页") homeExpandProgress else 0f }
                     val backdropBlurProgress = { if (page == "首页" && !appListBlurEnabled) 0f else currentBlurProgress() }
 
                     // Sample the rendered desktop backdrop, including the app-list blur,
                     // gradient and scrim, rather than the original unfiltered wallpaper.
-                    Box(Modifier.fillMaxSize().then(if (RenderPerformance.blur31)
+                    Box(Modifier.fillMaxSize().then(if (!transparentVideoBackdrop && RenderPerformance.blur31)
                         Modifier.hazeSource(menuHaze) else Modifier)) {
                     if (page == "媒体库") {
                         FollowContentWallpaper(banner, artwork, wallpaperHaze)
@@ -670,7 +673,7 @@ fun TvDesktop() {
                             wallpaperMode == WallpaperMode.VIDEO && videoUri != null ->
                                 Box(Modifier.fillMaxSize()) {
                                     Image(artwork.background.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                                    VideoWallpaperSurface(videoUri, Modifier.fillMaxSize(), active = page == "首页" && homeExpandProgress < .05f && !settings && !settingsPage && playingMedia == null && !ScreenSaverState.isActive)
+                                    VideoWallpaperSurface(videoUri, Modifier.fillMaxSize().then(if (RenderPerformance.blur31) Modifier.hazeSource(wallpaperHaze) else Modifier), active = page == "首页" && playingMedia == null && !ScreenSaverState.isActive)
                                 }
                             wallpaperMode != WallpaperMode.FOLLOW_CONTENT && fixedWallpaper != null ->
                                 Image(fixedWallpaper, null, Modifier.fillMaxSize()
@@ -686,7 +689,7 @@ fun TvDesktop() {
                                     contentScale = ContentScale.Crop)
                         }
                     }
-                    if (RenderPerformance.blur31 && !cachedHomeBlur) {
+                    if (!transparentVideoBackdrop && RenderPerformance.blur31 && !cachedHomeBlur) {
                         Box(Modifier.fillMaxSize().hazeEffect(wallpaperHaze) {
                             blurEnabled = backdropBlurProgress() > 0f
                             blurRadius = ((if (page == "首页") appListBlur else 50f) * backdropBlurProgress()).coerceAtLeast(.01f).dp
@@ -703,7 +706,7 @@ fun TvDesktop() {
                         }, contentScale = ContentScale.Crop)
                     }
                     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0x08202020), Color(0x0A101010), Color(0xA6101010)))))
-                    Canvas(Modifier.fillMaxSize()) { drawRect(Color.Black.copy(alpha = (if (page == "首页") appListOpacity else .72f) * currentBlurProgress())) }
+                    Canvas(Modifier.fillMaxSize()) { drawRect(Color.Black.copy(alpha = (if (transparentVideoBackdrop) 0f else if (page == "首页") appListOpacity else .72f) * currentBlurProgress())) }
                     }
                     if (page == "媒体库" && (!hasAccounts || !MediaLibraryManager.hasData)) {
                         Column(Modifier.align(Alignment.Center).padding(64.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -711,7 +714,7 @@ fun TvDesktop() {
                             Spacer(Modifier.height(20.dp))
                             Text(if (!hasAccounts) "连接 Emby、Plex、WebDAV 或 Alist" else "检查数据源连接、账号权限，或稍后重试", color = Muted, fontSize = 22.sp)
                             Spacer(Modifier.height(30.dp))
-                            GlassButton(if (!hasAccounts) "添加媒体库" else "重新加载", Modifier.width(320.dp).height(68.dp).focusRequester(playback)) {
+                            GlassButton(if (!hasAccounts) "添加媒体库" else "重新加载", Modifier.width(320.dp).height(68.dp).focusRequester(playback).focusProperties { up = nav }) {
                                 if (!hasAccounts) addingMediaLibrary = true else MediaLibraryManager.refresh()
                             }
                             if (hasAccounts) {
@@ -1011,8 +1014,8 @@ fun TvDesktop() {
                     }
                 }
                 }
-                if (addingMediaLibrary) Box(Modifier.fillMaxSize().zIndex(220f).background(Color(0xFF10151B)).padding(horizontal = 180.dp, vertical = 40.dp)) {
-                    AddServerDialog(null, onDismiss = { addingMediaLibrary = false; scope.launch { withFrameNanos { }; runCatching { playback.requestFocus() } } }, onSaved = { account ->
+                if (addingMediaLibrary) Box(Modifier.fillMaxSize().zIndex(220f)) {
+                    AddServerDialog(null, standalone = true, onDismiss = { addingMediaLibrary = false; scope.launch { withFrameNanos { }; runCatching { playback.requestFocus() } } }, onSaved = { account ->
                         AccountManager.addAccount(account)
                         MediaLibraryManager.refresh()
                         addingMediaLibrary = false
@@ -1416,6 +1419,7 @@ private fun FollowContentWallpaper(
 @Composable
 private fun Header(page: String, haze: HazeState, legacyBlur: ImageBitmap?, nav: FocusRequester, homeNav: FocusRequester, artwork: DemoArtwork, backdropReveal: () -> Float, onPage: (String) -> Unit, onSettings: (Offset?) -> Unit, onSearch: () -> Unit, onContent: () -> Unit, onNavigationFocus: () -> Unit = {}) {
     val context = LocalContext.current
+    val transparentVideo = LocalTransparentVideoBackdrop.current
     val tuningVersion = DesktopPreferences.version
     val navBlur = remember(tuningVersion) { DesktopPreferences.GlassTuning.navBlur(context) }
     val navOpacity = remember(tuningVersion) { DesktopPreferences.GlassTuning.navOpacity(context) }
@@ -1441,7 +1445,7 @@ private fun Header(page: String, haze: HazeState, legacyBlur: ImageBitmap?, nav:
         false
     }) {
         Box(Modifier.fillMaxSize().clip(Glass)
-        .then(if (RenderPerformance.blur31) Modifier.hazeEffect(haze) {
+        .then(if (!transparentVideo && RenderPerformance.blur31) Modifier.hazeEffect(haze) {
             blurEnabled = navBlur > 0f
             blurRadius = navBlur.coerceAtLeast(.01f).dp
             noiseFactor = 0f
@@ -1449,12 +1453,12 @@ private fun Header(page: String, haze: HazeState, legacyBlur: ImageBitmap?, nav:
             tints = emptyList()
             fallbackTint = HazeTint(Color.Transparent)
         } else Modifier)) {
-        if (RenderPerformance.staticBlur && legacyBlur != null && navBlur > 0f) {
+        if (!transparentVideo && RenderPerformance.staticBlur && legacyBlur != null && navBlur > 0f) {
             Canvas(Modifier.fillMaxSize().graphicsLayer { alpha = (navBlur / 24f).coerceIn(0f, 1f) }) {
                 drawCoverWallpaper(legacyBlur, IntSize(1672.dp.roundToPx(), canvasHeight.roundToPx()), IntOffset(-(((1672f - width.value) / 2) * density).toInt(), -(26 * density).toInt()))
             }
         }
-        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = navOpacity.coerceIn(0f, .9f))))
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = if (transparentVideo) 0f else navOpacity.coerceIn(0f, .9f))))
         }
         Row(Modifier.fillMaxSize().padding(5.dp), verticalAlignment = Alignment.CenterVertically) {
             tabs.forEachIndexed { i, tab ->

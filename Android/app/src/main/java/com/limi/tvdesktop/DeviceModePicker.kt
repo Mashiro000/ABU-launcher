@@ -79,7 +79,7 @@ internal fun CenteredSelectionPanel(
                 scaleX = if (RenderPerformance.reducedEffects) 1f else .96f + .04f * reveal.value
                 scaleY = scaleX
             }.clip(ContinuousCornerShape(30.dp))
-            .then(if (staticBlur != null && RenderPerformance.blurMode != RenderPerformance.BlurMode.NONE)
+            .then(if (LocalTransparentVideoBackdrop.current) Modifier else if (staticBlur != null && RenderPerformance.blurMode != RenderPerformance.BlurMode.NONE)
                 Modifier.drawBehind {
                     drawCoverWallpaper(staticBlur, IntSize(1672.dp.roundToPx(), canvasHeight.roundToPx()),
                         IntOffset(-bounds.left.toInt(), -bounds.top.toInt()))

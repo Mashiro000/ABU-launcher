@@ -22,6 +22,7 @@ import dev.chrisbanes.haze.*
 @OptIn(ExperimentalHazeApi::class)
 @Composable
 internal fun SettingsBackdrop(haze: HazeState?, staticBlur: ImageBitmap?, modifier: Modifier) {
+    if (LocalTransparentVideoBackdrop.current) return
     val view = LocalView.current
     var accelerated by remember(view) { mutableStateOf(view.isHardwareAccelerated) }
     var widthPx by remember { mutableFloatStateOf(0f) }
