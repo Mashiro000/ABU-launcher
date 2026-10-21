@@ -132,16 +132,6 @@ data class TvPlaybackInfo(
          * 提供给参考图标准示范的默认数据
          */
         fun createDemo(): TvPlaybackInfo {
-            val thumbList = listOf(
-                R.drawable.coast,
-                R.drawable.iceberg,
-                R.drawable.coast_background,
-                R.drawable.far_side,
-                R.drawable.planet_poster,
-                R.drawable.dune,
-                R.drawable.earth,
-                R.drawable.interstellar
-            )
 
             val episodes = (1..8).map { ep ->
                 TvEpisodeItem(
@@ -159,7 +149,7 @@ data class TvPlaybackInfo(
                         else -> "彼岸黎明"
                     },
                     thumbUrl = "",
-                    thumbResId = thumbList[(ep - 1) % thumbList.size],
+                    thumbResId = 0,
                     streamUrl = DEFAULT_TEST_VIDEO
                 )
             }

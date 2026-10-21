@@ -173,9 +173,12 @@ internal fun PluginSettingsPage(onBack: () -> Unit, returnRequester: FocusReques
     BackHandler(onBack = onBack)
     val childOpen = selectedPlugin != null || pendingInstall != null || addingRepository || repositoryEditor != null
     val baseOffset by animateFloatAsState(if (childOpen) -1f else 0f,
-        tween(RenderPerformance.duration(240)), label = "plugin-parent-slide")
+        tween(RenderPerformance.duration(140)), label = "plugin-parent-slide")
     LazyColumn(
-        Modifier.fillMaxSize().graphicsLayer { translationX = size.width * baseOffset }
+        Modifier.fillMaxSize().graphicsLayer {
+            if (RenderPerformance.reducedEffects) alpha = 1f + baseOffset
+            else translationX = size.width * baseOffset
+        }
             .focusProperties { onEnter = { if (childOpen) cancelFocusChange() } }.focusGroup(),
         contentPadding = PaddingValues(top = 40.dp, bottom = 100.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)

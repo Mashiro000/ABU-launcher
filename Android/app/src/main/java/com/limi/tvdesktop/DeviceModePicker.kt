@@ -55,29 +55,31 @@ internal fun DeviceModePicker(
 @OptIn(ExperimentalHazeApi::class)
 internal fun CenteredSelectionPanel(
     haze: HazeState, staticBlur: ImageBitmap?, description: String, onDismiss: () -> Unit,
+    panelHeight: androidx.compose.ui.unit.Dp = 228.dp,
+    onBack: () -> Unit = onDismiss,
     content: @Composable RowScope.() -> Unit,
 ) {
     val canvasHeight = LocalCanvasHeight.current
     var bounds by remember { mutableStateOf(Rect.Zero) }
     val reveal = remember { Animatable(0f) }
-    LaunchedEffect(Unit) { reveal.animateTo(1f, tween(RenderPerformance.duration(220))) }
-    BackHandler(onBack = onDismiss)
+    LaunchedEffect(Unit) { reveal.animateTo(1f, tween(RenderPerformance.duration(120))) }
+    BackHandler(onBack = onBack)
     Box(Modifier.fillMaxSize().zIndex(310f).onPreviewKeyEvent {
         if (it.key == Key.Back || it.key == Key.Escape) {
-            if (it.type == KeyEventType.KeyUp) onDismiss()
+            if (it.type == KeyEventType.KeyUp) onBack()
             true
         } else false
     }.focusProperties { onExit = { cancelFocusChange() } }.focusGroup()) {
         Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = .12f))
             .pointerInput(Unit) { detectTapGestures { onDismiss() } })
-        Row(Modifier.align(Alignment.Center).width(900.dp).height(228.dp)
+        Row(Modifier.align(Alignment.Center).width(900.dp).height(panelHeight)
             .onGloballyPositioned { bounds = it.boundsInRoot() }
             .graphicsLayer {
                 alpha = reveal.value
-                scaleX = .96f + .04f * reveal.value
+                scaleX = if (RenderPerformance.reducedEffects) 1f else .96f + .04f * reveal.value
                 scaleY = scaleX
             }.clip(ContinuousCornerShape(30.dp))
-            .then(if (staticBlur != null && !RenderPerformance.reducedEffects && RenderPerformance.blurMode != RenderPerformance.BlurMode.NONE)
+            .then(if (staticBlur != null && RenderPerformance.blurMode != RenderPerformance.BlurMode.NONE)
                 Modifier.drawBehind {
                     drawCoverWallpaper(staticBlur, IntSize(1672.dp.roundToPx(), canvasHeight.roundToPx()),
                         IntOffset(-bounds.left.toInt(), -bounds.top.toInt()))

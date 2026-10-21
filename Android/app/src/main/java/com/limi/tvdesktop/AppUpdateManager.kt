@@ -149,11 +149,12 @@ internal object AppUpdateManager {
         val apks = (0 until assets.length()).map { assets.getJSONObject(it) }
             .filter { it.optString("name").endsWith(".apk", ignoreCase = true) }
         val knownAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
-        val preferred = apks.firstOrNull { it.optString("name").contains("universal", true) }
-            ?: apks.firstOrNull { asset ->
-                knownAbis.firstOrNull { asset.optString("name").contains(it, ignoreCase = true) }
-                    ?.let { it in supportedAbis } == true
+        // Prefer the device's ABI order, keeping downloads small. Match x86_64 before x86.
+        val preferred = supportedAbis.firstNotNullOfOrNull { abi ->
+            apks.firstOrNull { asset ->
+                knownAbis.firstOrNull { asset.optString("name").contains(it, ignoreCase = true) } == abi
             }
+        } ?: apks.firstOrNull { it.optString("name").contains("universal", true) }
             ?: apks.singleOrNull()?.takeIf { asset ->
                 knownAbis.none { asset.optString("name").contains(it, ignoreCase = true) }
             }

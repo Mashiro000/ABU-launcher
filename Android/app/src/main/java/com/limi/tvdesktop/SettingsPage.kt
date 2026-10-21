@@ -1,6 +1,8 @@
 package com.limi.tvdesktop
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -64,6 +66,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -135,6 +139,8 @@ private fun itemsFor(category: SettingsCategory, context: Context): List<Pair<St
     SettingsCategory.DESKTOP -> listOf(
         "玻璃与模糊" to "导航条、Dock 与应用列表的模糊度和不透明度",
         "壁纸" to "自定义壁纸来源与预览",
+        "导航条" to "排序、项目显隐与长按移动",
+        "Dock 内容预览" to if (DockContent.enabled(context)) "已开启" else "已关闭 · 保留壁纸",
         "图标大小" to DesktopPreferences.IconScale.current(context).label,
         "时钟样式" to DesktopPreferences.ClockStyle.current(context).label,
         "时间格式" to DesktopPreferences.TimeFormat.current(context).label,
@@ -167,8 +173,7 @@ private fun itemsFor(category: SettingsCategory, context: Context): List<Pair<St
     SettingsCategory.LIBRARY -> listOf(
         "媒体数据源与账号管理" to "${AccountManager.accounts.size} 个服务器已配置",
         "媒体库展现模式" to AccountManager.displayMode.value.displayName,
-        "海报画质与加载" to AccountManager.posterQuality.value.displayName,
-        "未绑定时体验演示" to if (AccountManager.showDemoWhenEmpty.value) "已开启" else "已隐藏"
+        "海报画质与加载" to AccountManager.posterQuality.value.displayName
     )
     SettingsCategory.PLUGINS -> listOf(
         "插件管理" to "安装、启停、更新与插件专属设置",
@@ -182,6 +187,7 @@ private fun itemsFor(category: SettingsCategory, context: Context): List<Pair<St
     )
     SettingsCategory.GENERAL -> listOf(
         "设置默认桌面" to "阿布桌面",
+        "开源与致谢" to "CleanYourTV · Aerial · Tigris",
         "软件版本号" to (context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "未知"),
         "检查更新" to when (val update = AppUpdateManager.state) {
             UpdateCheckState.Idle -> "基于 GitHub Releases 检查"
@@ -282,7 +288,7 @@ internal fun SettingsPage(
         pendingReturnRow = null
         openingModule = true
         scope.launch {
-            if (!moduleOpen) moduleShrink.animateTo(1f, tween(RenderPerformance.duration(220)))
+            if (!moduleOpen) moduleShrink.animateTo(1f, tween(RenderPerformance.duration(120)))
             moduleOpen = true
             detail = if (pluginTab) "plugins" else null
             moduleShrink.snapTo(0f)
@@ -301,7 +307,9 @@ internal fun SettingsPage(
     @Suppress("DEPRECATION")
     val settingsBringIntoViewSpec = remember {
         object : BringIntoViewSpec {
-            override val scrollAnimationSpec = tween<Float>(RenderPerformance.duration(PAGE_TRANSITION_MS), easing = PageTransitionEasing)
+            override val scrollAnimationSpec = tween<Float>(RenderPerformance.duration(140), easing = PageTransitionEasing)
+            override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float =
+                offset - minOf(containerSize * .34f, (containerSize - size).coerceAtLeast(0f))
         }
     }
 
@@ -320,7 +328,7 @@ internal fun SettingsPage(
         if (closing) return
         closing = true
         scope.launch {
-            drawerReveal.animateTo(0f, tween(RenderPerformance.duration(220)))
+            drawerReveal.animateTo(0f, tween(RenderPerformance.duration(120)))
             onClose()
         }
     }
@@ -387,7 +395,10 @@ internal fun SettingsPage(
     Box(
         Modifier
             .fillMaxHeight().width(drawerWidth)
-            .graphicsLayer { translationX = -size.width * (1f - drawerReveal.value) }
+            .graphicsLayer {
+                if (RenderPerformance.reducedEffects) alpha = drawerReveal.value
+                else translationX = -size.width * (1f - drawerReveal.value)
+            }
             .zIndex(200f)
             .onPreviewKeyEvent {
                 if (it.key == Key.Escape || it.key == Key.Back) {
@@ -481,8 +492,8 @@ internal fun SettingsPage(
                 Modifier.graphicsLayer {
                     val p = moduleShrink.value
                     transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
-                    scaleX = 1f - .82f * p
-                    scaleY = 1f - .82f * p
+                    scaleX = if (RenderPerformance.reducedEffects) 1f else 1f - .82f * p
+                    scaleY = scaleX
                     alpha = 1f - p
                 }, initialFocusKey = selectedModule)
         } else {
@@ -511,9 +522,10 @@ internal fun SettingsPage(
                     }
                     .focusGroup()
             ) {
-                AnimatedContent(targetState = detail, modifier = Modifier.fillMaxSize().clipToBounds(), transitionSpec = {
-                    val duration = RenderPerformance.duration(240)
-                    if (targetState == null) slideInHorizontally(tween(duration)) { -it } togetherWith slideOutHorizontally(tween(duration)) { it }
+                AnimatedContent(targetState = detail, modifier = Modifier.fillMaxSize().clipToBounds().padding(horizontal = 12.dp), transitionSpec = {
+                    val duration = RenderPerformance.duration(140)
+                    if (RenderPerformance.reducedEffects) fadeIn(tween(duration)) togetherWith fadeOut(tween(duration))
+                    else if (targetState == null) slideInHorizontally(tween(duration)) { -it } togetherWith slideOutHorizontally(tween(duration)) { it }
                     else slideInHorizontally(tween(duration)) { it } togetherWith slideOutHorizontally(tween(duration)) { -it }
                 }, label = "settings-subpage") { displayedDetail ->
                 when (displayedDetail) {
@@ -521,6 +533,9 @@ internal fun SettingsPage(
                     "time_format", "date_display", "motion", "blur", "corners", "autostart" -> SettingsChoiceDetail(
                         displayedDetail, onBack = { backToList() }, onChanged = ::notifyDesktopChanged)
 
+                    "dock_content" -> DockContentSettings(onBack = { backToList() }, onChanged = ::notifyDesktopChanged)
+                    "credits" -> CreditsSettings(onBack = { backToList() })
+                    "navigation" -> NavigationSettings(onBack = { backToList() }, onChanged = ::notifyDesktopChanged)
                     "wallpaper" -> WallpaperSettings(
                         onBack = {
                             backToList()
@@ -641,6 +656,9 @@ internal fun SettingsPage(
                             pendingReturnRow = label
                         },
                         onWallpaper = { detail = "wallpaper" },
+                        onNavigation = { detail = "navigation" },
+                        onCredits = { detail = "credits" },
+                        onDockContent = { detail = "dock_content" },
                         onGlassTuning = { detail = "glass_tuning" },
                         onAnimation = { detail = "animation" },
                         onDeveloper = { detail = "developer" },
@@ -723,6 +741,9 @@ private fun CategoryItems(
     onReturnConsumed: () -> Unit,
     onNavigateRow: (String) -> Unit,
     onWallpaper: () -> Unit,
+    onNavigation: () -> Unit,
+    onCredits: () -> Unit,
+    onDockContent: () -> Unit,
     onGlassTuning: () -> Unit,
     onAnimation: () -> Unit,
     onDeveloper: () -> Unit,
@@ -767,6 +788,7 @@ private fun CategoryItems(
     val firstLabel = sections[category]?.firstOrNull()?.first
     val currentCategoryVisible by rememberUpdatedState(onCategoryVisible)
     val currentPendingFocus by rememberUpdatedState(pendingFocusRow)
+    val currentFocusedLabel by rememberUpdatedState(focusedRow)
     var jumping by remember { mutableStateOf(false) }
 
     // Explicit selection scrolls the same list; scroll-spy never changes switchTick.
@@ -785,7 +807,9 @@ private fun CategoryItems(
     LaunchedEffect(listState, entries) {
         snapshotFlow {
             val anchor = with(density) { 48.dp.toPx() }
-            val visible = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.offset + it.size > anchor }
+            val visibleItems = listState.layoutInfo.visibleItemsInfo
+            val focused = visibleItems.firstOrNull { entries.getOrNull(it.index)?.label == currentFocusedLabel }
+            val visible = focused ?: visibleItems.firstOrNull { it.offset + it.size > anchor }
             entries.getOrNull(visible?.index ?: listState.firstVisibleItemIndex)?.category
         }.collect { section ->
             if (!jumping && currentPendingFocus == null && section != null) currentCategoryVisible(section)
@@ -797,23 +821,17 @@ private fun CategoryItems(
         if (index >= 0) {
             val section = entries[index].category
             currentCategoryVisible(section)
-            val margin = with(density) { 24.dp.roundToPx() }
+            val anchor = (listState.layoutInfo.viewportSize.height * .34f).toInt()
             val visible = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
-            if (visible == null) listState.animateScrollToItemSpring(index, -margin)
-            else {
-                val bottom = listState.layoutInfo.viewportSize.height - margin
-                val delta = when {
-                    visible.offset < margin -> visible.offset - margin
-                    visible.offset + visible.size > bottom -> visible.offset + visible.size - bottom
-                    else -> 0
-                }
-                if (delta != 0) listState.animateScrollBy(delta.toFloat(), pageMotion())
-            }
+            // Compose an offscreen row before requesting focus; do not wait for a long scroll animation.
+            if (visible == null) listState.scrollToItem(index, -anchor)
             repeat(12) {
                 withFrameNanos { }
-                val requester = if (label == sections[section]?.firstOrNull()?.first) firstRequester else focusedRowRequester
+                val requester = rowRefs.getValue(label)
                 if (runCatching { requester.requestFocus() }.getOrDefault(false)) {
                     onReturnConsumed()
+                    val current = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+                    if (current != null) listState.animateScrollBy((current.offset - anchor).toFloat(), tween(RenderPerformance.duration(140)))
                     return@LaunchedEffect
                 }
             }
@@ -826,7 +844,6 @@ private fun CategoryItems(
             if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
             if (ev.key != Key.DirectionDown && ev.key != Key.DirectionUp) return@onPreviewKeyEvent false
             val visibleLabels = listState.layoutInfo.visibleItemsInfo.mapNotNull { entries.getOrNull(it.index)?.label }
-            if (pendingFocusRow != null) return@onPreviewKeyEvent true
             val anchor = focusedRow ?: visibleLabels.firstOrNull()
             val current = settingRows.indexOfFirst { it.label == anchor }
             val next = current + if (ev.key == Key.DirectionDown) 1 else -1
@@ -854,6 +871,9 @@ private fun CategoryItems(
                 label == "玻璃与模糊" -> onGlassTuning
                 label == "隐藏应用管理" -> onHiddenApps
                 label == "壁纸" -> onWallpaper
+                label == "导航条" -> onNavigation
+                label == "开源与致谢" -> onCredits
+                label == "Dock 内容预览" -> onDockContent
                 label == "启动动画" -> onAnimation
                 label == "开发者选项" -> onDeveloper
                 label == "图标大小" -> onIconScale
@@ -882,7 +902,7 @@ private fun CategoryItems(
 
             val groupFirst = label == sections[section]?.firstOrNull()?.first
             val groupLast = label == sections[section]?.lastOrNull()?.first
-            Box(Modifier.fillMaxWidth()
+            Box(Modifier.fillMaxWidth().then(if (isFirst) Modifier.focusRequester(firstRequester) else Modifier)
                 .background(Color(0xFF202020).copy(alpha = 0.30f), RoundedCornerShape(
                     topStart = if (groupFirst) 16.dp else 0.dp, topEnd = if (groupFirst) 16.dp else 0.dp,
                     bottomStart = if (groupLast) 16.dp else 0.dp, bottomEnd = if (groupLast) 16.dp else 0.dp))
@@ -895,11 +915,7 @@ private fun CategoryItems(
                 SettingsRowItem(
                     label = label, value = subtitle,
                     grouped = true,
-                    focusRequester = when {
-                        isFirst -> firstRequester
-                        label == (pendingFocusRow ?: focusedRow) -> focusedRowRequester
-                        else -> rowRefs.getValue(label)
-                    },
+                    focusRequester = rowRefs.getValue(label),
                     leftReturnRequester = leftReturnRequester,
                     onClick = onClick,
                 )
@@ -971,13 +987,16 @@ internal fun Modifier.settingsAutoScroll(): Modifier = composed {
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     var size by remember { mutableStateOf(IntSize.Zero) }
+    var stillFocused by remember { mutableStateOf(false) }
     bringIntoViewRequester(requester)
         .onSizeChanged { size = it }
         .onFocusChanged { state ->
+            stillFocused = state.isFocused
             if (state.isFocused) scope.launch {
                 // Wait until Compose focus search and lazy/scroll layout have settled, then enforce
                 // a 20dp visual safety margin for the scaled focus treatment.
-                delay(48)
+                withFrameNanos { }
+                if (!stillFocused) return@launch
                 with(density) {
                     requester.bringIntoView(
                         Rect(0f, -20.dp.toPx(), size.width.toFloat(), size.height + 20.dp.toPx())
@@ -989,7 +1008,13 @@ internal fun Modifier.settingsAutoScroll(): Modifier = composed {
 
 @Composable
 internal fun Modifier.settingsVerticalScroll(): Modifier {
-    return this.verticalScroll(rememberScrollState())
+    val focusManager = LocalFocusManager.current
+    return this.onPreviewKeyEvent { event ->
+        if (event.key == Key.DirectionUp || event.key == Key.DirectionDown) {
+            if (event.type == KeyEventType.KeyDown) focusManager.moveFocus(if (event.key == Key.DirectionDown) FocusDirection.Down else FocusDirection.Up)
+            true
+        } else false
+    }.verticalScroll(rememberScrollState())
 }
 
 @Composable
@@ -1162,27 +1187,18 @@ internal fun SettingsRowItem(
             .bringIntoViewRequester(bringIntoView)
             .onSizeChanged { itemSize = it }
             .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
+                scaleX = if (RenderPerformance.reducedEffects) 1f else scale
+                scaleY = scaleX
             }
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .settingsAutoScroll()
+            .then(if (!grouped) Modifier.settingsAutoScroll() else Modifier)
             .focusProperties {
                 if (leftReturnRequester != null) left = leftReturnRequester
             }
             .onFocusChanged {
                 focused = it.isFocused
-                if (it.isFocused) {
-                    scope.launch {
-                        delay(50)
-                        with(density) {
-                            bringIntoView.bringIntoView(
-                                Rect(0f, -12.dp.toPx(), itemSize.width.toFloat(), itemSize.height + 12.dp.toPx())
-                            )
-                        }
-                    }
-                }
             }
+
             .onPreviewKeyEvent {
                 if (it.key == Key.DirectionCenter || it.key == Key.Enter || it.key == Key.NumPadEnter) {
                     if (it.type == KeyEventType.KeyDown) {
@@ -1214,18 +1230,18 @@ internal fun SettingsRowItem(
                 color = labelColor,
                 fontSize = 23.sp,
                 fontWeight = if (raised) FontWeight.SemiBold else FontWeight.Normal,
-                modifier = Modifier.weight(.4f).padding(end = 12.dp),
+                modifier = Modifier.weight(1f).padding(end = 12.dp),
                 maxLines = 2,
                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             )
 
-            Row(Modifier.weight(.6f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.End) {
+            Row(Modifier.widthIn(max = 180.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.End) {
                 if (value != null) {
                     Text(
                         value,
                         color = valueColor,
                         fontSize = 19.sp,
-                        modifier = Modifier.weight(1f, fill = false).padding(end = 10.dp),
+                        modifier = Modifier.widthIn(max = 148.dp).padding(end = 10.dp),
                         maxLines = 2,
                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     )
@@ -1262,8 +1278,8 @@ internal fun SettingsRadioRow(
             .fillMaxWidth()
             .height(74.dp)
             .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
+                scaleX = if (RenderPerformance.reducedEffects) 1f else scale
+                scaleY = scaleX
             }
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .settingsAutoScroll()

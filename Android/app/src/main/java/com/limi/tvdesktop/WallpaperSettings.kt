@@ -52,6 +52,8 @@ internal fun WallpaperSettings(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var mode by remember { mutableStateOf(WallpaperMode.current(context)) }
+    var onlineVideos by remember { mutableStateOf(false) }
+    var bingAuto by remember { mutableStateOf(BingWallpaper.autoUpdate(context)) }
     var downloading by remember { mutableStateOf(false) }
     var bingFailed by remember { mutableStateOf(false) }
     var downloaded by remember { mutableStateOf(BingWallpaper.downloaded(context)) }
@@ -93,6 +95,30 @@ internal fun WallpaperSettings(
         onWallpaperChanged()
     }
 
+    LaunchedEffect(mode) {
+        if (mode == WallpaperMode.BING) {
+            downloading = true
+            try { BingWallpaper.ensureDaily(context) }
+            finally {
+                downloading = false
+                downloaded = BingWallpaper.downloaded(context)
+                selectedDate = BingWallpaper.selectedDate(context)
+                bingFailed = downloaded.isEmpty()
+                onWallpaperChanged()
+            }
+        }
+    }
+    if (onlineVideos) {
+        SettingsInlinePage({ onlineVideos = false }) {
+            OnlineVideoWallpapers {
+                videoUri = VideoWallpaperPrefs.current(context)
+                mode = WallpaperMode.current(context)
+                onWallpaperChanged()
+            }
+        }
+        return
+    }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -124,20 +150,20 @@ internal fun WallpaperSettings(
         )
 
         SettingsSectionTitle("壁纸来源")
-        WallpaperMode.entries.forEach { m ->
-            SettingsRadioRow(
-                label = m.label,
-                selected = mode == m,
-                leftReturnRequester = returnRequester
-            ) {
-                applyMode(m)
+        WallpaperMode.entries.chunked(2).forEach { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                row.forEach { source ->
+                    WallpaperSourceCard(source, selected = mode == source, modifier = Modifier.weight(1f)) { applyMode(source) }
+                }
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(16.dp))
         }
+        Text("选择来源后，在下方预览并选择壁纸。完整图片与视频按需读取，内置少量小尺寸视频预览图。", color = Muted, fontSize = 17.sp)
 
         Spacer(Modifier.height(28.dp))
 
         when (mode) {
+            WallpaperMode.GRADIENT -> GradientPalettePicker(onWallpaperChanged)
             WallpaperMode.FOLLOW_CONTENT -> {
                 Box(
                     Modifier
@@ -157,8 +183,23 @@ internal fun WallpaperSettings(
 
             WallpaperMode.BING -> {
                 SettingsSectionTitle("今日必应壁纸")
+                SettingsRowItem("锁定当前 Bing 壁纸", if (bingAuto) "未锁定 · 每日更新" else "已锁定") {
+                    bingAuto = !bingAuto
+                    BingWallpaper.setAutoUpdate(context, bingAuto)
+                    if (bingAuto) scope.launch {
+                        downloading = true
+                        try { BingWallpaper.ensureDaily(context) }
+                        finally {
+                            downloading = false
+                            downloaded = BingWallpaper.downloaded(context)
+                            selectedDate = BingWallpaper.selectedDate(context)
+                            onWallpaperChanged()
+                        }
+                    }
+                }
+                Text(if (bingAuto) "每天使用桌面时自动检查更新，断网后稍后重试。" else "保留当前图片。关闭锁定可恢复每日更新；选择历史图片也会自动锁定。", color = Muted, fontSize = 17.sp)
                 SettingsRowItem(
-                    label = if (downloading) "正在下载必应超清壁纸…" else "下载并应用今日 Bing 壁纸",
+                    label = if (downloading) "正在下载必应超清壁纸…" else if (bingAuto) "检查并应用今日 Bing 壁纸" else "下载今日图片（保留当前）",
                     value = if (downloading) "下载中" else "每日更新",
                     leftReturnRequester = returnRequester
                 ) {
@@ -167,11 +208,14 @@ internal fun WallpaperSettings(
                         bingFailed = false
                         val daily = BingWallpaper.fetchToday()
                         if (daily != null) {
-                            BingWallpaper.download(context, daily)
-                            BingWallpaper.saveDate(context, daily.date)
-                            selectedDate = daily.date
-                            downloaded = BingWallpaper.downloaded(context)
-                            onWallpaperChanged()
+                            if (BingWallpaper.download(context, daily) != null) {
+                                if (bingAuto || downloaded.isEmpty()) {
+                                    BingWallpaper.saveDate(context, daily.date)
+                                    selectedDate = daily.date
+                                }
+                                downloaded = BingWallpaper.downloaded(context)
+                                onWallpaperChanged()
+                            } else bingFailed = true
                         } else bingFailed = true
                         downloading = false
                     }
@@ -184,6 +228,8 @@ internal fun WallpaperSettings(
                 if (downloaded.isNotEmpty()) {
                     SettingsSectionTitle("已下载壁纸历史")
                     DownloadedRow(downloaded, selectedDate, returnRequester) { date ->
+                        BingWallpaper.setAutoUpdate(context, false)
+                        bingAuto = false
                         BingWallpaper.saveDate(context, date)
                         selectedDate = date
                         onWallpaperChanged()
@@ -194,19 +240,19 @@ internal fun WallpaperSettings(
             }
 
             WallpaperMode.LOCAL -> {
-                SettingsSectionTitle("精选内置壁纸")
+                SettingsSectionTitle("本地图片")
                 LocalWallpapers.bundled.chunked(4).forEach { rowEntries ->
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         rowEntries.forEach { entry ->
-                            val bmp = remember(entry.res) {
-                                BitmapFactory.decodeResource(
+                            val bmp by produceState<ImageBitmap?>(null, entry.res) {
+                                value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { BitmapFactory.decodeResource(
                                     context.resources,
                                     entry.res,
                                     BitmapFactory.Options().apply { inSampleSize = 2 }
-                                ).asImageBitmap()
+                                ).asImageBitmap() }
                             }
-                            WallpaperThumb(
-                                bitmap = bmp,
+                            if (bmp != null) WallpaperThumb(
+                                bitmap = bmp!!,
                                 label = entry.name,
                                 selected = localRes == entry.res && localUri == null,
                                 modifier = Modifier.weight(1f),
@@ -238,6 +284,8 @@ internal fun WallpaperSettings(
 
             WallpaperMode.VIDEO -> {
                 SettingsSectionTitle("动态视频壁纸")
+                SettingsRowItem("浏览并下载在线视频壁纸", "航拍 · 海底 · 太空") { onlineVideos = true }
+                Spacer(Modifier.height(12.dp))
                 SettingsRowItem(
                     label = if (videoUri == null) "选择本地视频文件作为壁纸…" else "更换当前壁纸视频…",
                     value = if (videoUri != null) "已配置" else "未设置",
@@ -257,7 +305,7 @@ internal fun WallpaperSettings(
                         if (videoUri == null)
                             "尚未选择视频。设置后桌面将静音、无缝循环播放该动态视频，尽享生机勃勃的客厅巨幕。"
                         else
-                            "已选择视频壁纸。桌面背景将循环流畅播放。",
+                            "视频静音循环；离开桌面、待机或打开应用列表时暂停。文件无法读取时显示默认背景。低性能电视建议使用 1080p H.264 视频。",
                         color = Color(0xFFC5CBD6),
                         fontSize = 18.sp,
                         lineHeight = 26.sp
@@ -265,6 +313,26 @@ internal fun WallpaperSettings(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun WallpaperSourceCard(source: WallpaperMode, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    val shape = ContinuousCornerShape(18.dp)
+    val colors = when (source) {
+        WallpaperMode.FOLLOW_CONTENT -> listOf(Color(0xFF34455D), Color(0xFF1E2633))
+        WallpaperMode.BING -> listOf(Color(0xFF285E59), Color(0xFF183B42))
+        WallpaperMode.LOCAL -> listOf(Color(0xFF5A436A), Color(0xFF30293D))
+        WallpaperMode.GRADIENT -> listOf(Color(0xFF735581), Color(0xFF334775))
+        WallpaperMode.VIDEO -> listOf(Color(0xFF66513A), Color(0xFF372D29))
+    }
+    Column(modifier.height(124.dp).onFocusChanged { focused = it.hasFocus }.settingsAutoScroll()
+        .clip(shape).background(Brush.linearGradient(colors))
+        .border(if (focused) 3.dp else 1.dp, if (focused) Color.White else Color.White.copy(alpha = .15f), shape)
+        .clickable(onClick = onClick).padding(20.dp), verticalArrangement = Arrangement.SpaceBetween) {
+        Text(source.label, color = White, fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
+        Text(if (selected) "✓ 当前来源" else "选择来源 ›", color = Muted, fontSize = 16.sp)
     }
 }
 
@@ -281,10 +349,10 @@ private fun DownloadedRow(
     ) {
         items(files) { file ->
             val date = file.nameWithoutExtension
-            val bmp = remember(file) { BingWallpaper.bitmap(file) }
+            val bmp by produceState<ImageBitmap?>(null, file) { value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { BingWallpaper.bitmap(file) } }
             if (bmp != null) {
                 WallpaperThumb(
-                    bitmap = bmp,
+                    bitmap = bmp!!,
                     label = date,
                     selected = date == selectedDate,
                     modifier = Modifier.width(260.dp),

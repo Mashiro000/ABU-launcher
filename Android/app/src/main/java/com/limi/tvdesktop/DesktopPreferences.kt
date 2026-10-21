@@ -11,6 +11,8 @@ object DesktopPreferences {
     var version by mutableIntStateOf(0)
         private set
 
+    internal fun notifyChanged() { version++ }
+
     enum class DeviceMode(val label: String) {
         CONSOLE("主机模式"), HANDHELD("掌机模式"), TV("电视模式");
 

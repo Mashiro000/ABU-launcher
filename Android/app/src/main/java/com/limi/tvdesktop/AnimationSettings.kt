@@ -105,7 +105,7 @@ private fun AnimationPreview(anim: LaunchAnim) {
                 .size(190.dp, 108.dp)
                 .graphicsLayer {
                     val p = progress.value
-                    when (anim) {
+                    if (RenderPerformance.reducedEffects) alpha = p else when (anim) {
                         LaunchAnim.AUTO -> alpha = 1f
                         LaunchAnim.CIRCLE -> {
                             val s = .1f + .9f * p

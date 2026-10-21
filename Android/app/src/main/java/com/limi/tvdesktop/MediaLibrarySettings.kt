@@ -65,10 +65,13 @@ fun MediaLibrarySettings(
 
     val childOpen = showAddDialog || editingAccount != null || selectedAccountForManage != null
     val baseOffset by animateFloatAsState(if (childOpen) -1f else 0f,
-        tween(RenderPerformance.duration(240)), label = "media-parent-slide")
+        tween(RenderPerformance.duration(140)), label = "media-parent-slide")
     Column(
         Modifier
-            .fillMaxSize().graphicsLayer { translationX = size.width * baseOffset }
+            .fillMaxSize().graphicsLayer {
+                if (RenderPerformance.reducedEffects) alpha = 1f + baseOffset
+                else translationX = size.width * baseOffset
+            }
             .focusProperties { onEnter = { if (childOpen) cancelFocusChange() } }.focusGroup()
             .settingsVerticalScroll()
             .padding(top = 32.dp, bottom = 68.dp)
@@ -220,40 +223,6 @@ fun MediaLibrarySettings(
 
         Spacer(Modifier.height(28.dp))
 
-        // Section: Demo Data Toggle
-        SettingsSectionTitle("未绑定时体验演示")
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(ContinuousCornerShape(16.dp))
-                .background(Color(0x14FFFFFF))
-                .clickable {
-                    AccountManager.setShowDemoWhenEmpty(!AccountManager.showDemoWhenEmpty.value)
-                }
-                .padding(20.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text(
-                    "在无网络账号时显示示例电影海报",
-                    color = White,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Medium
-                )
-                Text(
-                    "若关闭，未绑定媒体源时将显示纯净的“添加媒体库”引导界面",
-                    color = Color(0xFF9EA3AE),
-                    fontSize = 14.sp
-                )
-            }
-            Text(
-                if (AccountManager.showDemoWhenEmpty.value) "已开启" else "已隐藏",
-                color = if (AccountManager.showDemoWhenEmpty.value) Color(0xFF22C55E) else Color(0xFF9EA3AE),
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
     }
 
     // Add Account Dialog
@@ -587,7 +556,7 @@ private fun TvButton(
 }
 
 @Composable
-private fun AddServerDialog(
+internal fun AddServerDialog(
     initialAccount: MediaAccount?,
     onDismiss: () -> Unit,
     onSaved: (MediaAccount) -> Unit

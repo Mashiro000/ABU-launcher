@@ -28,16 +28,19 @@ internal fun SettingsInlinePage(onDismiss: () -> Unit, content: @Composable Colu
     fun close() {
         if (closing) return
         closing = true
-        scope.launch { progress.animateTo(1f, tween(RenderPerformance.duration(240))); onDismiss() }
+        scope.launch { progress.animateTo(1f, tween(RenderPerformance.duration(140))); onDismiss() }
     }
     LaunchedEffect(Unit) {
         withFrameNanos { }
         back.requestFocus()
-        progress.animateTo(0f, tween(RenderPerformance.duration(240)))
+        progress.animateTo(0f, tween(RenderPerformance.duration(140)))
     }
     BackHandler { close() }
-    Column(Modifier.fillMaxSize().zIndex(10f).graphicsLayer { translationX = size.width * progress.value }
-        .background(Color(0xFF10151B)).settingsVerticalScroll().padding(top = 28.dp, bottom = 68.dp),
+    Column(Modifier.fillMaxSize().zIndex(10f).graphicsLayer {
+        if (RenderPerformance.reducedEffects) alpha = 1f - progress.value
+        else translationX = size.width * progress.value
+    }
+        .settingsVerticalScroll().padding(horizontal = 12.dp, vertical = 28.dp).padding(bottom = 40.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp)) {
         SettingsRowItem("← 返回", null, back, onClick = ::close)
         CompositionLocalProvider(LocalContentColor provides Color.White) { content() }

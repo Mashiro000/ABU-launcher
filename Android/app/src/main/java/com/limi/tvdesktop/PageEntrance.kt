@@ -4,6 +4,7 @@ import android.os.SystemClock
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.runtime.*
@@ -15,12 +16,14 @@ import androidx.compose.ui.unit.dp
 
 private val EntranceEasing = CubicBezierEasing(.16f, 1f, .3f, 1f)
 internal val PageTransitionEasing = CubicBezierEasing(.16f, 1f, .3f, 1f)
-internal const val PAGE_TRANSITION_MS = 700
-internal const val OVERLAY_TRANSITION_MS = 700
-internal const val SELECTION_TRANSITION_MS = 500
-internal fun pageMotion() = tween<Float>(RenderPerformance.duration(PAGE_TRANSITION_MS), easing = PageTransitionEasing)
-internal fun overlayMotion() = tween<Float>(RenderPerformance.duration(OVERLAY_TRANSITION_MS), easing = PageTransitionEasing)
-/** Every focus/option state uses the same 500ms rhythm in both directions. */
+internal const val PAGE_TRANSITION_MS = 600
+internal const val OVERLAY_TRANSITION_MS = 600
+internal const val SELECTION_TRANSITION_MS = 400
+internal fun pageMotion() = tween<Float>(RenderPerformance.duration(PAGE_TRANSITION_MS),
+    easing = if (RenderPerformance.reducedEffects) LinearEasing else PageTransitionEasing)
+internal fun overlayMotion() = tween<Float>(RenderPerformance.duration(OVERLAY_TRANSITION_MS),
+    easing = if (RenderPerformance.reducedEffects) LinearEasing else PageTransitionEasing)
+/** Every focus/option state uses the same 400ms rhythm in both directions. */
 internal fun focusMotion() = tween<Float>(RenderPerformance.duration(SELECTION_TRANSITION_MS), easing = CubicBezierEasing(.2f, .8f, .2f, 1f))
 internal fun focusScaleMotion(selected: Boolean): FiniteAnimationSpec<Float> = focusMotion()
 private class EntranceRegistry(var visited: MutableState<List<String>>)
@@ -42,7 +45,7 @@ internal fun AppEntranceHost(content: @Composable () -> Unit) {
 /** One shared clock, so lazy composition, refresh and recomposition cannot replay items. */
 @Composable
 internal fun PageEntranceScope(pageKey: String, enabled: Boolean = true, replayOnOpen: Boolean = false, content: @Composable () -> Unit) {
-    if (RenderPerformance.reducedEffects) {
+    if (RenderPerformance.motionMode == RenderPerformance.MotionMode.NONE) {
         CompositionLocalProvider(LocalTimeline provides null, content = content)
         return
     }
@@ -59,7 +62,7 @@ internal fun PageEntranceScope(pageKey: String, enabled: Boolean = true, replayO
             } else {
                 if (pageKey !in registry.visited.value) registry.visited.value = registry.visited.value + pageKey
                 val start = SystemClock.uptimeMillis()
-                // All components share one 700ms page transition timeline.
+                // All components share one 600ms page transition timeline.
                 while (timeline.elapsed < timeline.lastIndex * 35f + PAGE_TRANSITION_MS) {
                     withFrameNanos { }
                     timeline.elapsed = (SystemClock.uptimeMillis() - start).toFloat()
@@ -75,13 +78,14 @@ internal fun PageEntranceScope(pageKey: String, enabled: Boolean = true, replayO
 @Composable
 internal fun Modifier.staggeredEntrance(index: Int): Modifier {
     val timeline = LocalTimeline.current ?: return this
-    timeline.lastIndex = maxOf(timeline.lastIndex, index)
+    val reduced = RenderPerformance.motionMode == RenderPerformance.MotionMode.REDUCED
+    if (!reduced) timeline.lastIndex = maxOf(timeline.lastIndex, index)
     val distance = with(LocalDensity.current) { 20.dp.toPx() }
     return graphicsLayer {
-        val fraction = ((timeline.elapsed - index * 35f) / PAGE_TRANSITION_MS).coerceIn(0f, 1f)
-        val reveal = EntranceEasing.transform(fraction)
+        val fraction = ((timeline.elapsed - if (reduced) 0f else index * 35f) / PAGE_TRANSITION_MS).coerceIn(0f, 1f)
+        val reveal = if (reduced) fraction else EntranceEasing.transform(fraction)
         alpha = reveal
-        translationY = distance * (1f - reveal)
+        translationY = if (reduced) 0f else distance * (1f - reveal)
     }
 }
 

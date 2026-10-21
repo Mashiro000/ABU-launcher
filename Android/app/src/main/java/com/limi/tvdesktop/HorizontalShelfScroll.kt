@@ -31,7 +31,7 @@ internal val ShelfScrollMotion: AnimationSpec<Float>
  * the row moving with the repeat rate instead of queueing behind a full-length tween.
  */
 private val ShelfRepeatMotion: AnimationSpec<Float>
-    get() = tween(RenderPerformance.duration(160), easing = LinearOutSlowInEasing)
+    get() = tween(RenderPerformance.duration(80), easing = LinearOutSlowInEasing)
 private const val RepeatWindowNanos = 220_000_000L
 
 internal class ShelfScrollController(

@@ -18,12 +18,12 @@ class AppUpdateManagerTest {
     }
 
     @Test
-    fun choosesUniversalApkBeforeAbiSpecificAsset() {
+    fun choosesDeviceAbiBeforeLargerUniversalAsset() {
         val assets = JSONArray("""[
             {"name":"launcher-arm64-v8a.apk","browser_download_url":"https://github.com/example/arm.apk"},
             {"name":"launcher-universal.apk","browser_download_url":"https://github.com/example/all.apk"}
         ]""")
-        assertEquals("https://github.com/example/all.apk",
+        assertEquals("https://github.com/example/arm.apk",
             AppUpdateManager.selectApkUrl(assets, arrayOf("arm64-v8a")))
     }
 

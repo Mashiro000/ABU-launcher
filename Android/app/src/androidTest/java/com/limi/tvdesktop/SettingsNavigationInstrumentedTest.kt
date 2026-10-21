@@ -32,7 +32,7 @@ class SettingsNavigationInstrumentedTest {
     @Test fun remoteVisitsEverySettingWithoutSkippingAcrossSections() {
         showSettings()
         compose.onNodeWithText("桌面与外观").performClick()
-        val rows = listOf("玻璃与模糊", "壁纸", "图标大小", "时钟样式", "时间格式", "日期显示",
+        val rows = listOf("玻璃与模糊", "壁纸", "导航条", "Dock 内容预览", "图标大小", "时钟样式", "时间格式", "日期显示",
             "时间显示秒数", "Dock 布局", "应用圆角", "启动默认页", "屏幕保护", "开机自启动", "强制横屏",
             "应用列表背景模糊", "网格密度", "文件夹页码样式")
         rows.forEachIndexed { index, label ->
@@ -61,7 +61,7 @@ class SettingsNavigationInstrumentedTest {
                 RenderPerformance.init(context)
                 assertEquals(RenderPerformance.MotionMode.REDUCED, RenderPerformance.motionMode)
                 assertFalse(RenderPerformance.blur31)
-                assertEquals(160, RenderPerformance.duration(700))
+                assertEquals(700, RenderPerformance.duration(700))
             }
             compose.onNodeWithText("无动画").performClick()
             compose.runOnIdle {
@@ -159,7 +159,7 @@ class SettingsNavigationInstrumentedTest {
         showSettings()
         compose.onNodeWithText("桌面与外观").performClick()
         // Position the startup section at the top, rather than merely revealing it at the bottom.
-        compose.onNodeWithTag("continuous-settings-list").performScrollToIndex(11)
+        compose.onNodeWithTag("continuous-settings-list").performScrollToIndex(12)
         compose.onNodeWithContentDescription("启动与行为").assertIsSelected()
         compose.onNodeWithContentDescription("性能与动画").performClick()
         compose.onNodeWithText("低性能模式").assertIsDisplayed().assertIsFocused()

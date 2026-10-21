@@ -10,8 +10,8 @@ android {
         applicationId = "com.limi.tvdesktop"
         minSdk = 25
         targetSdk = 35
-        versionCode = 8
-        versionName = "0.06"
+        versionCode = 9
+        versionName = "0.07"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     splits {
@@ -20,6 +20,18 @@ android {
             reset()
             include("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
             isUniversalApk = true
+        }
+    }
+    // Reference an existing keystore in restricted build environments; never copy it into the repo.
+    System.getenv("ABU_DEBUG_SIGNING_STORE")?.let { path ->
+        signingConfigs.getByName("debug").storeFile = file(path)
+    }
+    System.getenv("ABU_SIGNING_STORE")?.let { path ->
+        signingConfigs.create("localRelease") {
+            storeFile = file(path)
+            storePassword = System.getenv("ABU_SIGNING_STORE_PASSWORD") ?: "android"
+            keyAlias = System.getenv("ABU_SIGNING_ALIAS") ?: "androiddebugkey"
+            keyPassword = System.getenv("ABU_SIGNING_KEY_PASSWORD") ?: storePassword
         }
     }
     buildFeatures { compose = true }
@@ -52,7 +64,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("localRelease") ?: signingConfigs.getByName("debug")
         }
     }
     compileOptions {
@@ -67,10 +79,10 @@ dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
-    androidTestImplementation("androidx.test:runner:1.6.2")
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4:1.10.4")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
     debugImplementation("androidx.compose.ui:ui-test-manifest:1.10.4")
     implementation("androidx.activity:activity-compose:1.12.2")
     implementation("androidx.compose.ui:ui:1.10.4")

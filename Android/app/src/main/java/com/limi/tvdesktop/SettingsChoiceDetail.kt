@@ -51,6 +51,8 @@ internal fun SettingsChoiceDetail(page: String, onBack: () -> Unit, onChanged: (
         SettingsRowItem("← 返回分类", null, back, onClick = onBack)
         Spacer(Modifier.height(24.dp))
         Text(config.first, color = White, fontSize = 34.sp, fontWeight = FontWeight.Bold)
+        if (page == "motion") Text("完整动画：缩放与位移；精简动画：淡入淡出，保持过渡时长；无动画：直接切换。",
+            color = Muted, fontSize = 18.sp)
         Spacer(Modifier.height(20.dp))
         if (page == "autostart") {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
@@ -63,6 +65,10 @@ internal fun SettingsChoiceDetail(page: String, onBack: () -> Unit, onChanged: (
         } else config.second.forEachIndexed { index, label ->
             SettingsRadioRow(label, config.third == label) { choose(index) }
             Spacer(Modifier.height(8.dp))
+        }
+        if (page == "blur") {
+            Text("老电视与投影仪建议使用静态模糊。精简／无动画仍保留静态模糊；不支持实时模糊的系统会使用静态模糊。",
+                color = Muted, fontSize = 18.sp, modifier = Modifier.padding(top = 18.dp))
         }
     }
 }

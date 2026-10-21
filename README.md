@@ -11,15 +11,20 @@
 
 项目基于 **Kotlin + Jetpack Compose** 原生开发，注重遥控器、手柄与触控输入，以及媒体播放、插件扩展和流畅的焦点交互。
 
-最新版本 **0.06**：[下载安装包](https://github.com/Mashiro000/ABU-launcher/releases/tag/v0.06) · [更新日志](CHANGELOG.md) · [版本说明](docs/RELEASE_NOTES_0_06.md)。
+最新版本 **0.07**：[下载安装包](https://github.com/Mashiro000/ABU-launcher/releases/tag/v0.07) · [更新日志](CHANGELOG.md) · [版本说明](docs/RELEASE_NOTES_0_07.md)。
 
 > 💬 **用户与开发者官方 QQ 交流群**：**`367281933`**（欢迎加群反馈体验、交流功能建议、获取最新内测包）
 
 ---
-<img width="1280" height="696" alt="image" src="https://github.com/user-attachments/assets/30a557a0-7090-4b4c-9971-c299461aac7c" />
-<img width="1280" height="696" alt="image" src="https://github.com/user-attachments/assets/ed5a1b34-da17-4678-ae06-bc37250366bd" />
-<img width="1280" height="696" alt="image" src="https://github.com/user-attachments/assets/a4d841a7-193f-4730-9308-550560fd899c" />
-<img width="1164" height="655" alt="image" src="https://github.com/user-attachments/assets/3e697f4c-92e0-4f73-b962-a8996a5eefb1" />
+本次 0.07 实际界面（模拟器截图）：
+
+![渐变桌面](docs/images/0.07/gradient-home.png)
+![应用移动](docs/images/0.07/move-app.png)
+![壁纸设置与渐变色卡](docs/images/0.07/gradient-picker.png)
+![在线视频壁纸与真实预览](docs/images/0.07/video-wallpaper.png)
+![空媒体库与添加入口](docs/images/0.07/media-library.png)
+
+视频和预览画面来源见 [素材说明](docs/VIDEO_WALLPAPER_SOURCES.md)。
 
 ---
 
@@ -32,6 +37,9 @@
   - G2 连续曲率超椭圆（Squircle）胶囊与卡片。
   - 高动态焦点悬浮光晕（Focus Glow & Sweep）与平滑缩放反馈。
   - 媒体卡片展开至电影/剧集详情页的弹性流体过渡（Spring 物理动画与共享时间轴入场动效）。
+- 🎨 **原创渐变壁纸**：六组内置配色，圆形渐变色块选择，代码生成，基本不增加素材体积。
+- 🎞️ **视频与每日壁纸**：内置在线航拍目录、真实画面预览、按需下载与本地视频；Bing 每日检查，支持锁定和历史选择。
+- 📺 **Dock 内容预览（可关闭）**：读取支持应用的 Android TV 推荐频道与 Watch Next，展示内容与跳转按钮；没有公开数据时保留壁纸，默认关闭。
 - 🌫️ **分代系毛玻璃与渐进模糊**：
   - **Android 12+ (API 31+)**：支持硬件加速实时背景模糊；Android 13+ 的设置背景支持渐进式模糊，导航条使用均匀模糊。
   - **Android 7.1 起**：提供后台降采样静态模糊，效果可按设备性能调整或关闭。
@@ -103,11 +111,14 @@
 ## 🚀 编译与运行
 
 ### 运行环境要求
-1. **JDK 17** 及以上
+1. **JDK 21**（Gradle daemon 配置要求）
 2. **Android SDK 36.1**（编译使用，最低运行版本为 Android 7.1 / API 25）
 3. 最新版 **Android Studio** (推荐 Ladybug / Meerkat 或更高版本)
 
 ### 命令行编译
+
+macOS / Linux：在 Android 目录运行 `./gradlew assembleRelease`。可通过 `ABU_SIGNING_STORE` 引用既有签名文件；密码与别名使用环境变量 `ABU_SIGNING_STORE_PASSWORD`、`ABU_SIGNING_ALIAS`、`ABU_SIGNING_KEY_PASSWORD`，不要把密钥或密码提交到仓库。未指定时沿用 Android debug 签名流程。
+
 
 在 `Android` 目录下执行：
 
@@ -121,15 +132,37 @@ cd Android
 ```
 
 编译成功后会同时生成 `arm64-v8a`、`armeabi-v7a`、`x86`、`x86_64` 与通用 APK，产物位于：
-- **Debug 版**：`Android/app/build/outputs/apk/debug/app-debug.apk`
+- **Debug 版**：`Android/app/build/outputs/apk/debug/app-<ABI>-debug.apk`
 - **Release 版**：`Android/app/build/outputs/apk/release/`
 
 ### 安装到电视或模拟器
 
+**直接安装：** 在 [0.07 发布页](https://github.com/Mashiro000/ABU-launcher/releases/tag/v0.07) 下载对应架构 APK 或 universal 通用包，用电视文件管理器点击安装。安装后可从“应用 / 全部应用”点击阿布图标打开；设置为默认桌面为可选操作。
+
+**电脑辅助安装：** 安装 Android SDK Platform-Tools，在仓库根目录运行：
+
 ```bash
-adb connect <电视设备IP>:5555
-adb install -r Android/app/build/outputs/apk/release/app-universal-release.apk
+# 普通安装，自动识别 ABI 并校验官方下载
+TV=192.168.1.20 bash tools/install.sh
+
+# 用户选择默认桌面时再显式启用
+TV=192.168.1.20 SET_HOME=1 bash tools/install.sh
+
+# 恢复安装前记录的默认桌面，保留阿布和数据
+TV=192.168.1.20 bash tools/restore.sh
 ```
+
+**AI Agent 安装：** 将电视地址和仓库链接交给能执行电脑命令的 Agent，要求先阅读 [Agent 安装说明](docs/AGENT_INSTALL.md) 并按实际输出验收。
+
+[详细安装与恢复教程](docs/ADB_INSTALL.md) 包含 Windows / macOS / Linux 命令、无线配对、架构选择、故障排查与校验方法。
+
+> 0.07 使用维护者提供的阿布桌面密钥，与旧 0.06 的 debug 签名不同。旧版可能无法直接覆盖；先记录或备份配置，再决定是否卸载重装。脚本不会自动卸载或清数据。当前没有保持 ADB 常开或无障碍桌面守护功能，厂商 HOME 限制需实测。
+
+### 参考与致谢
+
+阿布桌面在开发过程中学习和参考了 [CleanYourTV](https://cleanyour.tv)、[Aerial](https://github.com/pengchujin/aerial-tv) 与 [Tigris](https://github.com/lesnolie/Tigris) 的安装引导、电视交互及性能优化思路。感谢作者与贡献者，他们的开源工作为本项目提供了灵感和参考。
+
+阿布按自身设计风格和功能需求独立实现；如使用第三方代码、字体或素材，保留对应来源、版权与许可证声明。参考项目与本项目不存在背书关系。
 
 ---
 

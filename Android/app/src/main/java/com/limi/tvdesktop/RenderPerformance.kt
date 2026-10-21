@@ -14,23 +14,24 @@ internal object RenderPerformance {
     enum class BlurMode(val label: String) { NONE("无模糊"), STATIC("静态模糊"), REALTIME("实时模糊") }
     var lowPerformance by mutableStateOf(false)
         private set
-    var blurMode by mutableStateOf(if (Build.VERSION.SDK_INT >= 31) BlurMode.REALTIME else BlurMode.STATIC)
+    var blurMode by mutableStateOf(BlurMode.STATIC)
         private set
 
     val reducedEffects: Boolean
         get() = motionMode != MotionMode.FULL
-    fun duration(full: Int): Int = when (motionMode) {
-        MotionMode.FULL -> full
-        MotionMode.REDUCED -> minOf(full, 160)
-        MotionMode.NONE -> 0
-    }
+    // Reduced motion changes the transition, not its speed.
+    fun duration(full: Int): Int = durationFor(motionMode, full)
+    internal fun durationFor(mode: MotionMode, full: Int): Int =
+        if (mode == MotionMode.NONE) 0 else full
     val blur31: Boolean
         get() = blurMode == BlurMode.REALTIME && !reducedEffects && Build.VERSION.SDK_INT >= 31
     val blur33: Boolean
         get() = blurMode == BlurMode.REALTIME && !reducedEffects && Build.VERSION.SDK_INT >= 33
     val staticBlur: Boolean
-        get() = !reducedEffects && (blurMode == BlurMode.STATIC ||
-            (blurMode == BlurMode.REALTIME && Build.VERSION.SDK_INT < 31))
+        get() = usesStaticBlur(motionMode, blurMode, Build.VERSION.SDK_INT)
+
+    internal fun usesStaticBlur(motion: MotionMode, blur: BlurMode, sdk: Int): Boolean =
+        blur != BlurMode.NONE && (blur == BlurMode.STATIC || motion != MotionMode.FULL || sdk < 31)
 
     fun init(context: Context) {
         val prefs = context.getSharedPreferences("desktop", Context.MODE_PRIVATE)
@@ -39,7 +40,7 @@ internal object RenderPerformance {
                 ?: if (prefs.getBoolean("lowPerformance", false)) MotionMode.REDUCED.name else MotionMode.FULL.name)
         }.getOrDefault(MotionMode.FULL)
         lowPerformance = motionMode != MotionMode.FULL
-        val defaultMode = if (Build.VERSION.SDK_INT >= 31) BlurMode.REALTIME else BlurMode.STATIC
+        val defaultMode = BlurMode.STATIC
         blurMode = runCatching {
             val saved = prefs.getString("blurMode", null)
             if (saved != null) BlurMode.valueOf(saved)

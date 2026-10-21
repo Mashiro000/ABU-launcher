@@ -5,7 +5,11 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.*
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.media3.common.PlaybackException
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
@@ -29,13 +33,14 @@ enum class WallpaperMode(val label: String) {
     FOLLOW_CONTENT("跟随内容"),
     BING("Bing 每日壁纸"),
     LOCAL("本地壁纸"),
+    GRADIENT("渐变色"),
     VIDEO("视频壁纸");
 
     companion object {
         fun current(context: Context): WallpaperMode {
             val name = context.getSharedPreferences("desktop", Context.MODE_PRIVATE)
-                .getString("wallpaperMode", FOLLOW_CONTENT.name) ?: FOLLOW_CONTENT.name
-            return runCatching { valueOf(name) }.getOrDefault(FOLLOW_CONTENT)
+                .getString("wallpaperMode", GRADIENT.name) ?: GRADIENT.name
+            return runCatching { valueOf(name) }.getOrDefault(GRADIENT)
         }
         fun save(context: Context, mode: WallpaperMode) {
             context.getSharedPreferences("desktop", Context.MODE_PRIVATE)
@@ -48,16 +53,7 @@ enum class WallpaperMode(val label: String) {
 object LocalWallpapers {
     data class Entry(val name: String, val res: Int)
 
-    val bundled = listOf(
-        Entry("海岸", R.drawable.coast), Entry("沙丘", R.drawable.dune),
-        Entry("地球", R.drawable.earth), Entry("星际穿越", R.drawable.interstellar),
-        Entry("星球", R.drawable.planet), Entry("月球", R.drawable.moon),
-        Entry("芙莉莲", R.drawable.frieren_v2), Entry("机器人", R.drawable.robot),
-        Entry("春色", R.drawable.spring), Entry("繁花", R.drawable.blossoms),
-        Entry("冰山", R.drawable.iceberg), Entry("远界", R.drawable.far_side),
-        Entry("夏日", R.drawable.summer), Entry("长安", R.drawable.changan),
-        Entry("海边", R.drawable.memory_beach), Entry("日落", R.drawable.memory_sunset),
-    )
+    val bundled = emptyList<Entry>()
 
     private const val PREFS = "desktop"
     private const val KEY_RES = "wallpaperLocalRes"
@@ -81,8 +77,8 @@ object LocalWallpapers {
 
     fun bitmap(context: Context): ImageBitmap? {
         selectedRes(context)?.let { res ->
-            return BitmapFactory.decodeResource(context.resources, res,
-                BitmapFactory.Options().apply { inSampleSize = 2 }).asImageBitmap()
+            return runCatching { BitmapFactory.decodeResource(context.resources, res,
+                BitmapFactory.Options().apply { inSampleSize = 2 })?.asImageBitmap() }.getOrNull()
         }
         val uri = selectedUri(context) ?: return null
         return runCatching {
@@ -128,15 +124,48 @@ object BingWallpaper {
             conn.connectTimeout = 10000
             conn.readTimeout = 15000
             val out = fileFor(context, daily.date)
-            conn.inputStream.use { input -> out.outputStream().use { input.copyTo(it) } }
-            conn.disconnect()
-            out
+            val partial = File(out.parentFile, out.name + ".part")
+            try {
+                conn.inputStream.use { input -> partial.outputStream().use { input.copyTo(it) } }
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(partial.absolutePath, bounds)
+                require(bounds.outWidth > 0 && bounds.outHeight > 0) { "Invalid wallpaper image" }
+                check(partial.renameTo(out))
+                downloaded(context).filterNot { it.nameWithoutExtension == selectedDate(context) }.drop(12).forEach { it.delete() }
+                out
+            } finally { conn.disconnect(); partial.delete() }
+
         }.getOrNull()
     }
 
     fun bitmap(file: File): ImageBitmap? = runCatching {
         BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply { inSampleSize = 2 }).asImageBitmap()
     }.getOrNull()
+
+    var revision by mutableIntStateOf(0)
+        private set
+    private val updateMutex = kotlinx.coroutines.sync.Mutex()
+    private fun prefs(context: Context) = context.getSharedPreferences("desktop", Context.MODE_PRIVATE)
+    fun autoUpdate(context: Context) = prefs(context).getBoolean("bingAutoUpdate", true)
+    fun setAutoUpdate(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean("bingAutoUpdate", enabled).apply()
+        if (enabled) prefs(context).edit().remove("bingCheckedDay").apply()
+    }
+    /** Checks on entry/resume and while the desktop is running; failures are retried later. */
+    suspend fun ensureDaily(context: Context): Boolean {
+        updateMutex.lock()
+        try {
+            val missing = downloaded(context).isEmpty()
+            if (!missing && !autoUpdate(context)) return false
+            val today = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US).format(java.util.Date())
+            if (!missing && prefs(context).getString("bingCheckedDay", null) == today) return false
+            val daily = fetchToday() ?: return false
+            if (!fileFor(context, daily.date).exists() && download(context, daily) == null) return false
+            saveDate(context, daily.date)
+            prefs(context).edit().putString("bingCheckedDay", today).apply()
+            return true
+        } finally { updateMutex.unlock() }
+    }
 
     private const val KEY_DATE = "wallpaperBingDate"
 
@@ -145,6 +174,7 @@ object BingWallpaper {
 
     fun saveDate(context: Context, date: String) {
         context.getSharedPreferences("desktop", Context.MODE_PRIVATE).edit().putString(KEY_DATE, date).apply()
+        revision++
     }
 
     /** Selected downloaded Bing image (defaults to the most recent one). */
@@ -170,18 +200,33 @@ object VideoWallpaperPrefs {
 /** Full-screen looping, muted video surface used as the launcher background. */
 @Composable
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-internal fun VideoWallpaperSurface(uri: Uri, modifier: Modifier = Modifier) {
+internal fun VideoWallpaperSurface(uri: Uri, modifier: Modifier = Modifier, active: Boolean = true) {
     val context = LocalContext.current
     val player = remember(uri) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(uri))
             repeatMode = Player.REPEAT_MODE_ONE
             volume = 0f
-            playWhenReady = true
+            playWhenReady = false
             prepare()
         }
     }
+    val lifecycle = (context as? LifecycleOwner)?.lifecycle
+    var failed by remember(uri) { mutableStateOf(false) }
+    DisposableEffect(player, lifecycle, active) {
+        fun updatePlayback() { player.playWhenReady = active && !failed && lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) != false }
+        val observer = LifecycleEventObserver { _, _ -> updatePlayback() }
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) { failed = true; player.playWhenReady = false }
+        }
+        player.addListener(listener)
+        lifecycle?.addObserver(observer)
+        updatePlayback()
+        onDispose { lifecycle?.removeObserver(observer); player.removeListener(listener); player.pause() }
+    }
     DisposableEffect(player) { onDispose { player.release() } }
+    if (failed) return
+
     AndroidView(
         factory = { ctx ->
             PlayerView(ctx).apply {
@@ -190,6 +235,7 @@ internal fun VideoWallpaperSurface(uri: Uri, modifier: Modifier = Modifier) {
                 resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
             }
         },
-        modifier = modifier
+        modifier = modifier,
+        update = { it.player = player }
     )
 }

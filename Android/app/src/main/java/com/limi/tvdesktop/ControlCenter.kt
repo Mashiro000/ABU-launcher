@@ -89,7 +89,7 @@ internal fun ControlCenter(
         if (closing) return
         closing = true
         scope.launch {
-            reveal.animateTo(0f, tween(RenderPerformance.duration(240), easing = CubicBezierEasing(.4f, 0f, 1f, 1f)))
+            reveal.animateTo(0f, tween(RenderPerformance.duration(140), easing = CubicBezierEasing(.4f, 0f, 1f, 1f)))
             onClose()
             action?.invoke()
         }
@@ -106,14 +106,7 @@ internal fun ControlCenter(
     LaunchedEffect(Unit) {
         withFrameNanos { }
         runCatching { first.requestFocus() }
-        if (RenderPerformance.motionMode == RenderPerformance.MotionMode.FULL) {
-            reveal.animateTo(1f, keyframes {
-                durationMillis = 460
-                0f at 0 using CubicBezierEasing(.16f, 1f, .3f, 1f)
-                1.025f at 300 using CubicBezierEasing(.4f, 0f, .2f, 1f)
-                1f at 460
-            })
-        } else reveal.animateTo(1f, tween(RenderPerformance.duration(160)))
+        reveal.animateTo(1f, controlCenterOpenMotion())
     }
 
     Box(Modifier.fillMaxSize().zIndex(300f)
@@ -135,7 +128,7 @@ internal fun ControlCenter(
                 transformOrigin = if (origin != null && panelBounds.width > 0f && panelBounds.height > 0f)
                     TransformOrigin((origin.x - panelBounds.left) / panelBounds.width, (origin.y - panelBounds.top) / panelBounds.height)
                     else TransformOrigin(1f, 0f)
-                val scale = if (RenderPerformance.motionMode == RenderPerformance.MotionMode.REDUCED) .9f + .1f * reveal.value else reveal.value
+                val scale = if (RenderPerformance.reducedEffects) 1f else reveal.value
                 scaleX = scale.coerceAtLeast(.001f)
                 scaleY = scale.coerceAtLeast(.001f)
                 alpha = reveal.value.coerceIn(0f, 1f)
@@ -199,7 +192,7 @@ private fun QuickTile(icon: QuickIcon, title: String, subtitle: String?, modifie
     val focused by interaction.collectIsFocusedAsState()
     val hovered by interaction.collectIsHoveredAsState()
     val active = focused || hovered
-    val emphasis by animateFloatAsState(if (active) 1f else 0f, tween(RenderPerformance.duration(180)), label = "quick-focus")
+    val emphasis by animateFloatAsState(if (active) 1f else 0f, tween(RenderPerformance.duration(80)), label = "quick-focus")
     val foreground = lerp(Color(0xFFEDEDE6), Color(0xFF151713), emphasis)
     val background = lerp(Color(0x80050505), Color(0xFFF2F3EB), emphasis)
     Box(modifier.graphicsLayer {

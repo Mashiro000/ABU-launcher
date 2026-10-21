@@ -34,12 +34,12 @@ import java.text.SimpleDateFormat
 import java.util.*
 internal object DetailOrigin { var bounds=Rect(64f,650f,384f,830f); var restoreFocus:()->Unit={}; var retainedFocus by mutableStateOf<FocusRequester?>(null); var returnProgress by mutableStateOf(0f); var returning by mutableStateOf(false) }
 // Monotonic entrance: 800ms, with no overshoot or rebound.
-private fun coverTransition()=tween<Float>(RenderPerformance.duration(800),easing=CubicBezierEasing(.16f,1f,.3f,1f))
+private fun coverTransition()=tween<Float>(RenderPerformance.duration(700),easing=CubicBezierEasing(.16f,1f,.3f,1f))
 // Return: collapse back into the card with a soft spring settle (matches the focus zoom amplitude).
 private fun returnMotion(): FiniteAnimationSpec<Float> = if (RenderPerformance.reducedEffects) pageMotion() else spring<Float>(dampingRatio=.75f,stiffness=130f,visibilityThreshold=.001f)
 /** Detail page rhythm, measured from the reference design (841pt wide canvas). */
 internal object DetailDesign { val inset=72.dp; val sectionGap=32.dp; val titleGap=LibraryDesign.titleGap; val shelfPad=14.dp; val cardGap=28.dp }
-internal fun isDetailMedia(m:DemoMedia)=m.realItem != null || (m !in DemoLibrary.music && m !in DemoLibrary.memories && m !in DemoLibrary.categories)
+internal fun isDetailMedia(m:DemoMedia)=m.realItem != null
 @Composable internal fun MediaDetailPage(media:DemoMedia,artwork:DemoArtwork,registerClose:((()->Unit)?)->Unit,onDismiss:(()->Unit)->Unit,onPlayItem:((MediaItemInfo)->Unit)?=null){
  val scope=rememberCoroutineScope(); val expansion=remember(media){Animatable(0f)}; val origin=remember(media){DetailOrigin.bounds}; val restore=remember(media){DetailOrigin.restoreFocus}
  var exiting by remember{mutableStateOf(false)}; var ready by remember{mutableStateOf(false)}; val scroll=rememberLazyListState(); val play=remember{FocusRequester()}; val shelf=remember{FocusRequester()}; val castFocus=remember{FocusRequester()}; val similarFocus=remember{FocusRequester()}; val infoFocus=remember{FocusRequester()}
@@ -73,7 +73,6 @@ internal fun isDetailMedia(m:DemoMedia)=m.realItem != null || (m !in DemoLibrary
      }
  }
 
- val castPhotos by produceState(emptyList<ImageBitmap>(),artwork){value=withContext(Dispatchers.Default){listOf(R.drawable.cast_zhouyutong,R.drawable.cast_jingboran,R.drawable.cast_zhouyutong,R.drawable.cast_zhangli,R.drawable.cast_yongmei,R.drawable.cast_jingboran,R.drawable.cast_zhangli).map{artwork.castImage(it)}}}
  val series=media.detail.contains("集")||media.detail.contains("电视剧")||media.title in listOf("暗涌","长安月","葬送的芙莉莲","我们的星球","地球脉动 III")||media.realItem?.mediaType in listOf("Series","Episode")||realEpisodes.isNotEmpty()
  val tabs=if(series)listOf("剧集","演职人员","类似作品","更多信息")else listOf("演职人员","类似作品","更多信息")
  val real=media.realItem; val isReal=real!=null
@@ -97,8 +96,8 @@ internal fun isDetailMedia(m:DemoMedia)=m.realItem != null || (m !in DemoLibrary
  val castPeople=detailPeople.filter{it.type=="Actor"}.ifEmpty{if(isReal)detailPeople else emptyList()}
  val seasons=realEpisodes.map{it.seasonNumber}.distinct().sorted()
  val showEpisodes=series&&(if(isReal)realEpisodes.isNotEmpty() else true)
- val showCast=if(isReal)castPeople.isNotEmpty() else true
- val showSimilar=if(isReal)similarItems.isNotEmpty() else true
+ val showCast=castPeople.isNotEmpty()
+ val showSimilar=similarItems.isNotEmpty()
  val detailRows1=if(isReal)buildList{
   realOriginalTitle.takeIf{it.isNotBlank()}?.let{add("原始标题" to it)}
   itemDetail?.premiereDate?.takeIf{it.isNotBlank()}?.let{add("首播时间" to it)}
@@ -137,7 +136,7 @@ internal fun isDetailMedia(m:DemoMedia)=m.realItem != null || (m !in DemoLibrary
  fun go(i:Int){target=i;navigate{scroll.animateScrollToItem(i+1,-with(density){128.dp.roundToPx()});withFrameNanos{};when(tabs[i]){"剧集"->seasonFocus;"演职人员"->castAllFocus;"类似作品"->similarAllFocus;else->infoFocus}.requestFocus()}}
  BackHandler{close()};LaunchedEffect(media){DetailOrigin.returnProgress=0f;DetailOrigin.returning=false;expansion.animateTo(1f,coverTransition());ready=true;withFrameNanos{};play.requestFocus()}
  val canvasHeight=LocalCanvasHeight.current
- val geometryProgress=expansion.value; val p=geometryProgress.coerceIn(0f,1f); fun mix(a:Float,b:Float)=a+(b-a)*geometryProgress
+ val geometryProgress=if(RenderPerformance.reducedEffects)1f else expansion.value; val p=geometryProgress.coerceIn(0f,1f); fun mix(a:Float,b:Float)=a+(b-a)*geometryProgress
  val g=geometryProgress
  val finalWidth=if(g<0f)origin.width*(1f+g)else mix(origin.width,1672f)
  val finalHeight=if(g<0f)origin.height*(1f+g)else mix(origin.height,canvasHeight.value)
@@ -149,7 +148,7 @@ internal fun isDetailMedia(m:DemoMedia)=m.realItem != null || (m !in DemoLibrary
  FocusRowsHost(scroll,rowSpecs,ready&&!exiting&&menu==null){
  PageEntranceScope("detail:${media.title}",enabled=ready,replayOnOpen=true){
  Box(Modifier.fillMaxSize().zIndex(100f).onPreviewKeyEvent{if(it.type==KeyEventType.KeyDown&&it.key==Key.Escape){close();true}else false}.onKeyEvent{if(it.type==KeyEventType.KeyDown&&(it.key==Key.DirectionUp||it.key==Key.DirectionDown))moveVertical(it.key)else false}.focusProperties{onExit={if(!exiting)cancelFocusChange()}}.focusGroup()){
-  Box(Modifier.fillMaxSize().then(if(RenderPerformance.blur31)Modifier.hazeSource(topBarSource)else Modifier)){
+  Box(Modifier.fillMaxSize().graphicsLayer{alpha=if(RenderPerformance.reducedEffects)expansion.value.coerceIn(0f,1f) else 1f}.then(if(RenderPerformance.blur31)Modifier.hazeSource(topBarSource)else Modifier)){
   Box(Modifier.offset(finalLeft.dp,finalTop.dp).size(finalWidth.dp,finalHeight.dp).then(if(exiting)Modifier.border(3.dp,White,ContinuousCornerShape((12f*(1f-p*p*p)).dp))else Modifier).clip(ContinuousCornerShape((12f*(1f-p*p*p)).dp)).then(if(RenderPerformance.blur33)Modifier.hazeSource(glassSource)else Modifier)){
    Box(Modifier.fillMaxSize().then(if(RenderPerformance.blur33)Modifier.hazeSource(wallpaperSource)else Modifier)){
     val detailBackdrop = media.realItem?.backdropUrl
@@ -186,9 +185,9 @@ internal fun isDetailMedia(m:DemoMedia)=m.realItem != null || (m !in DemoLibrary
 
     }}
     if(series)item(key="episodes"){if(showEpisodes)DSection{
-     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Row(horizontalArrangement=Arrangement.spacedBy(24.dp)){if(!isReal||seasons.size>1)DButton("第 $season 季",Modifier.staggeredEntrance(10).size(136.dp,52.dp).rowFocusTarget(row="episodeActions").focusRequester(seasonFocus).focusProperties{right=countFocus;down=shelf}.onPreviewKeyEvent{if(it.type==KeyEventType.KeyDown&&it.key==Key.DirectionUp){navigate{scroll.animateScrollToItem(0);withFrameNanos{};play.requestFocus()};true}else false}){menu="选择季数"};DButton(if(realEpisodes.isNotEmpty())"共 ${realEpisodes.size} 集 ⌄" else "共 12 集 ⌄",Modifier.staggeredEntrance(11).size(184.dp,52.dp).rowFocusTarget(row="episodeActions").focusRequester(countFocus).focusProperties{left=seasonFocus;right=allEpisodesFocus;down=shelf}.onPreviewKeyEvent{if(it.type==KeyEventType.KeyDown&&it.key==Key.DirectionUp){navigate{scroll.animateScrollToItem(0);withFrameNanos{};play.requestFocus()};true}else false}){menu="全部剧集"}};CapsuleTextAction("全部剧集 →",Modifier.staggeredEntrance(12).rowFocusTarget(row="episodeActions").focusRequester(allEpisodesFocus).focusProperties{left=countFocus;down=shelf}.onPreviewKeyEvent{if(it.type==KeyEventType.KeyDown&&it.key==Key.DirectionUp){navigate{scroll.animateScrollToItem(0);withFrameNanos{};play.requestFocus()};true}else false},fontSize=20.sp){menu="全部剧集"}}
+     Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Row(horizontalArrangement=Arrangement.spacedBy(24.dp)){if(!isReal||seasons.size>1)DButton("第 $season 季",Modifier.staggeredEntrance(10).size(136.dp,52.dp).rowFocusTarget(row="episodeActions").focusRequester(seasonFocus).focusProperties{right=countFocus;down=shelf}.onPreviewKeyEvent{if(it.type==KeyEventType.KeyDown&&it.key==Key.DirectionUp){navigate{scroll.animateScrollToItem(0);withFrameNanos{};play.requestFocus()};true}else false}){menu="选择季数"};DButton(if(realEpisodes.isNotEmpty())"共 ${realEpisodes.size} 集 ⌄" else "暂无剧集",Modifier.staggeredEntrance(11).size(184.dp,52.dp).rowFocusTarget(row="episodeActions").focusRequester(countFocus).focusProperties{left=seasonFocus;right=allEpisodesFocus;down=shelf}.onPreviewKeyEvent{if(it.type==KeyEventType.KeyDown&&it.key==Key.DirectionUp){navigate{scroll.animateScrollToItem(0);withFrameNanos{};play.requestFocus()};true}else false}){menu="全部剧集"}};CapsuleTextAction("全部剧集 →",Modifier.staggeredEntrance(12).rowFocusTarget(row="episodeActions").focusRequester(allEpisodesFocus).focusProperties{left=countFocus;down=shelf}.onPreviewKeyEvent{if(it.type==KeyEventType.KeyDown&&it.key==Key.DirectionUp){navigate{scroll.animateScrollToItem(0);withFrameNanos{};play.requestFocus()};true}else false},fontSize=20.sp){menu="全部剧集"}}
      Spacer(Modifier.height(DetailDesign.titleGap-DetailDesign.shelfPad));
-     val epCount = if(realEpisodes.isNotEmpty()) realEpisodes.size else 12
+     val epCount = realEpisodes.size
      DShelf(epCount,shelf,368.dp,row="episodes",entranceIndex=13,onDown={go(tabs.indexOf("演职人员"))}){i,m->
       if(realEpisodes.isNotEmpty() && i < realEpisodes.size){
        val ep = realEpisodes[i]
@@ -200,12 +199,11 @@ internal fun isDetailMedia(m:DemoMedia)=m.realItem != null || (m !in DemoLibrary
         } else { menu="播放第 ${i+1} 集" }
        }
       } else {
-       DItem(m.focusProperties{up=seasonFocus},"S0$season E${(i+1).toString().padStart(2,'0')}  ${listOf("潮声之初","逆风而行","暮色灯塔","海的另一面","漂流的岛","无人知晓","再见，海岸","更大的世界")[i%8]}","${43+i%6} 分钟 · 演示剧集",207.dp,if(i%3==2)artwork.background.asImageBitmap()else artwork.rememberImage(DemoLibrary.watching[i%5]),"在海岸的风与潮声中，故事继续。"){menu="播放第 ${i+1} 集"}
       }
      }
     }}
-    item(key="cast"){if(showCast)DSection{DSectionTitle("演职人员",entranceIndex=castEntrance,hasShelf=true,allModifier=Modifier.focusRequester(castAllFocus).focusProperties{down=if(series)castFocus else shelf},onAll=if(isReal)null else ({menu="演职人员"}));if(isReal){DShelf(castPeople.size,if(!series)shelf else castFocus,200.dp,row="cast",entranceIndex=castEntrance+1,onDown={go(tabs.indexOf("类似作品"))}){i,m->val p=castPeople[i];val bmp=if(p.imageUrl.isNotBlank())rememberPosterImage(p.imageUrl)else null;DItem(m.focusProperties{up=castAllFocus},p.name,p.role.ifBlank{when(p.type){"Director"->"导演";"Writer"->"编剧";else->"演员"}},244.dp,bmp?:artwork.background.asImageBitmap()){menu=p.name}}}else{val cast=listOf("林夏" to R.drawable.cast_zhouyutong,"陈牧驰" to R.drawable.cast_jingboran,"周雨彤" to R.drawable.cast_zhouyutong,"张颂文" to R.drawable.cast_zhangli,"李庚希" to R.drawable.cast_yongmei,"黄轩" to R.drawable.cast_jingboran,"王砚辉" to R.drawable.cast_zhangli);DShelf(cast.size,if(!series)shelf else castFocus,200.dp,row="cast",entranceIndex=castEntrance+1,onDown={go(tabs.indexOf("类似作品"))}){i,m->DItem(m.focusProperties{up=castAllFocus},cast[i].first,if(i==3)"导演 · 演示资料"else"主演 · 演示资料",244.dp,castPhotos.getOrElse(i){artwork.background.asImageBitmap()}){menu=cast[i].first}}}}}
-    item(key="similar"){if(showSimilar)DSection{DSectionTitle("类似作品",entranceIndex=similarEntrance,hasShelf=true,allModifier=Modifier.focusRequester(similarAllFocus).focusProperties{down=similarFocus},onAll=if(isReal)null else ({menu="类似作品"}));if(isReal){DShelf(similarItems.size,similarFocus,LibraryDesign.posterWidth,row="similar",entranceIndex=similarEntrance+1,onDown={go(tabs.indexOf("更多信息"))}){i,m->val s=similarItems[i];val bmp=if(s.posterUrl.isNotBlank())rememberPosterImage(s.posterUrl)else null;DItem(m.focusProperties{up=similarAllFocus},s.title,s.detail,342.dp,bmp?:artwork.background.asImageBitmap()){previewMedia=s}}}else{DShelf(6,similarFocus,LibraryDesign.posterWidth,row="similar",entranceIndex=similarEntrance+1,onDown={go(tabs.indexOf("更多信息"))}){i,m->val related=(DemoLibrary.watching+DemoLibrary.favorites)[i];DItem(m.focusProperties{up=similarAllFocus},related.title,related.detail,342.dp,artwork.rememberImage(related)){menu="${related.title} · 演示推荐"}}}}}
+    item(key="cast"){if(showCast)DSection{DSectionTitle("演职人员",entranceIndex=castEntrance,hasShelf=true,allModifier=Modifier.focusRequester(castAllFocus).focusProperties{down=if(series)castFocus else shelf},onAll=if(isReal)null else ({menu="演职人员"}));if(isReal){DShelf(castPeople.size,if(!series)shelf else castFocus,200.dp,row="cast",entranceIndex=castEntrance+1,onDown={go(tabs.indexOf("类似作品"))}){i,m->val p=castPeople[i];val bmp=if(p.imageUrl.isNotBlank())rememberPosterImage(p.imageUrl)else null;DItem(m.focusProperties{up=castAllFocus},p.name,p.role.ifBlank{when(p.type){"Director"->"导演";"Writer"->"编剧";else->"演员"}},244.dp,bmp?:artwork.background.asImageBitmap()){menu=p.name}}}}}
+    item(key="similar"){if(showSimilar)DSection{DSectionTitle("类似作品",entranceIndex=similarEntrance,hasShelf=true,allModifier=Modifier.focusRequester(similarAllFocus).focusProperties{down=similarFocus},onAll=if(isReal)null else ({menu="类似作品"}));if(isReal){DShelf(similarItems.size,similarFocus,LibraryDesign.posterWidth,row="similar",entranceIndex=similarEntrance+1,onDown={go(tabs.indexOf("更多信息"))}){i,m->val s=similarItems[i];val bmp=if(s.posterUrl.isNotBlank())rememberPosterImage(s.posterUrl)else null;DItem(m.focusProperties{up=similarAllFocus},s.title,s.detail,342.dp,bmp?:artwork.background.asImageBitmap()){previewMedia=s}}}}}
     item(key="info"){if(showInfo||showMediaInfo)DSection{
      if(showInfo){DSectionTitle("更多信息",entranceIndex=infoEntrance);Row(horizontalArrangement=Arrangement.spacedBy(24.dp)){
       if(detailRows1.isNotEmpty())Info(Modifier.weight(1f).staggeredEntrance(infoEntrance+1).rowFocusTarget(row="info").focusRequester(infoFocus).focusProperties{down=mediaInfoFocus}.readingFocus(),detailRows1)
